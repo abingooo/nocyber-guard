@@ -3,7 +3,7 @@ module github.com/abingooo/nocyber-guard
 go 1.26.6
 
 require (
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	modernc.org/sqlite v1.36.1
 )
 
