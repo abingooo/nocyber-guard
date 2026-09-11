@@ -1,0 +1,59 @@
+# Optional availability profile. Include nginx-http-common.conf.example once,
+# then place this entire example in nginx's http{} context.
+#
+# The official app is a backup only for transport failures that happen before
+# nginx has sent a non-idempotent request to Guard. nginx does not retry POST,
+# PATCH, or other non-idempotent methods after sending the request upstream
+# unless the forbidden "non_idempotent" option is configured.
+upstream nocyber_guard_with_connect_fallback {
+    server 127.0.0.1:18087 max_fails=1 fail_timeout=5s;
+    server 127.0.0.1:18085 backup;
+    keepalive 64;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+    client_max_body_size 256m;
+
+    # Handle the invalid no-slash form locally. Never redirect/replay a
+    # generation POST.
+    location = /image/api-proxy { return 404; }
+    location ^~ /image/api-proxy/ {
+        # The trailing slash strips the public image-site proxy prefix.
+        proxy_pass http://nocyber_guard_with_connect_fallback/;
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $http_authorization;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        proxy_pass http://nocyber_guard_with_connect_fallback;
+        # Do not add HTTP status codes here. A 502/503 returned by Guard is an
+        # application response and must not silently bypass the audit layer.
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $nocyber_connection_upgrade;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

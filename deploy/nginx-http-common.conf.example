@@ -1,0 +1,7 @@
+# Install this file once from nginx's http{} context, for example:
+#   include /etc/nginx/snippets/nocyber-guard-http.conf;
+# Do not copy the map into individual server{} blocks or define it twice.
+map $http_upgrade $nocyber_connection_upgrade {
+    default upgrade;
+    ''      close;
+}

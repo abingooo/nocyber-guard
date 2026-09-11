@@ -1,0 +1,21 @@
+NoCyber Guard
+Copyright (C) 2026 NoCyber Guard contributors
+
+NoCyber Guard contains an independently packaged adaptation of the instruction
+audit work developed for ModelPort. That work was based on Sub2API and is
+distributed under the GNU Lesser General Public License, version 3 or later.
+
+Sub2API
+Copyright (C) Wei-Shaw and Sub2API contributors
+https://github.com/Wei-Shaw/sub2api
+License: GNU Lesser General Public License v3.0 or later
+
+ModelPort instruction audit V2
+Copyright (C) abingooo and ModelPort contributors
+Source revision used for provenance:
+b6cb4d0c8b47d7561631ab61418e1b6fdeb379bc
+License: GNU Lesser General Public License v3.0 or later
+
+The corresponding source and modification history for NoCyber Guard are
+provided in this repository. Product and project names remain the property of
+their respective owners. No endorsement by the upstream projects is implied.

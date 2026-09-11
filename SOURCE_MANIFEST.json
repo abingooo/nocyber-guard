@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "product": "NoCyber Guard",
+  "sources": [
+    {
+      "name": "ModelPort instruction audit V2",
+      "relationship": "behavioral_reference_and_selective_adaptation",
+      "revision": "b6cb4d0c8b47d7561631ab61418e1b6fdeb379bc",
+      "license": "LGPL-3.0-or-later",
+      "reference_paths": [
+        "backend/internal/securityaudit/instruction_v2_service.go",
+        "backend/internal/securityaudit/instruction_v2_parser.go",
+        "backend/internal/securityaudit/instruction_v2_ai.go",
+        "backend/internal/securityaudit/instruction_v2_repository.go",
+        "backend/internal/handler/security_audit_helper.go"
+      ]
+    },
+    {
+      "name": "Sub2API",
+      "repository": "https://github.com/Wei-Shaw/sub2api",
+      "release": "v0.2.4",
+      "revision": "5de5e2bed035d43591a2e10e51f420ef6a84eb98",
+      "license": "LGPL-3.0-or-later",
+      "relationship": "upstream_platform_and_compatibility_target"
+    }
+  ]
+}

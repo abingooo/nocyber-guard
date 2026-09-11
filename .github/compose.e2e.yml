@@ -1,0 +1,97 @@
+name: nocyber-guard-e2e
+
+services:
+  fake-upstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: e2e-upstream
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8081/__e2e/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    networks:
+      - e2e
+
+  guard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VERSION: 0.1.0-e2e
+        VCS_REF: compose-e2e
+        BUILD_DATE: 1970-01-01T00:00:00Z
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        APK_MIRROR: ${APK_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
+    read_only: true
+    init: true
+    stop_grace_period: 25s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NCG_UPSTREAM_URL: http://fake-upstream:8081
+      NCG_LISTEN_ADDR: 0.0.0.0:8080
+      NCG_ADMIN_LISTEN_ADDR: 0.0.0.0:9090
+      NCG_DATA_DIR: /data
+      NCG_MASTER_KEY: e2e-master-key-not-for-production
+      NCG_INITIAL_ADMIN_PASSWORD: e2e-admin-password
+      NCG_ADMIN_COOKIE_SECURE: "false"
+    volumes:
+      - guard-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    depends_on:
+      fake-upstream:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/_nocyber/readyz >/dev/null && wget -q -O - http://127.0.0.1:9090/_nocyber/readyz >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      start_period: 5s
+      retries: 30
+    networks:
+      - e2e
+
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: e2e-client
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NCG_E2E_GUARD_URL: http://guard:8080
+      NCG_E2E_ADMIN_URL: http://guard:9090
+      NCG_E2E_UPSTREAM_URL: http://fake-upstream:8081
+      NCG_E2E_ADMIN_PASSWORD: e2e-admin-password
+    depends_on:
+      guard:
+        condition: service_healthy
+    profiles:
+      - e2e
+    networks:
+      - e2e
+
+volumes:
+  guard-data:
+
+networks:
+  e2e:
+    internal: true

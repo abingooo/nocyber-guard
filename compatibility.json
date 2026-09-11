@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "proxy": {
+    "transparent_default": true,
+    "protected_requests": [
+      {"method": "POST", "path": "/v1/responses", "protocol": "openai_responses"},
+      {"method": "POST", "path": "/responses", "protocol": "openai_responses"},
+      {"method": "POST", "path": "/backend-api/codex/responses", "protocol": "openai_responses"}
+    ],
+    "response_streaming": "transparent",
+    "websocket": "pass_through_only"
+  },
+  "event_contract": {
+    "version": 1,
+    "required_fields": [
+      "request_id",
+      "path",
+      "model",
+      "client_profile",
+      "field_name",
+      "prompt_sha256",
+      "action",
+      "outcome",
+      "reason",
+      "ai_result",
+      "audit_latency_ms",
+      "ai_latency_ms",
+      "upstream_accessed"
+    ],
+    "action_values": ["audit", "bypass"],
+    "outcome_values": ["allow", "block", "fail_open"],
+    "upstream_accessed_semantics": "true means Guard handed an allowed request to its single configured upstream; blocked requests are false"
+  },
+  "upstreams": [
+    {"name": "Sub2API", "status": "supported", "profile": "transparent"},
+    {"name": "New API", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"},
+    {"name": "CPA", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"}
+  ],
+  "not_audited_in_v0_1": [
+    "/v1/chat/completions",
+    "/v1/messages",
+    "websocket_message_frames",
+    "response_content"
+  ]
+}

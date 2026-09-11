@@ -1,0 +1,322 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import {
+  AlertTriangle,
+  Check,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Link2,
+  LoaderCircle,
+  RefreshCw,
+  Save,
+  Server,
+  ShieldCheck,
+  TestTube2,
+  Zap,
+} from 'lucide-vue-next'
+import { api, ApiError } from '@/api/client'
+import type { AIEndpoint, GuardConfig } from '@/types'
+import { useToast } from '@/composables/toast'
+
+const defaultConfig: GuardConfig = {
+  version: 0,
+  enabled: true,
+  mode: 'permissive',
+  upstream_url: '',
+  protected_paths: ['/v1/responses', '/responses', '/backend-api/codex/responses'],
+  request_timeout_ms: 15000,
+  max_body_bytes: 4 * 1024 * 1024,
+  event_retention_days: 30,
+}
+const defaultEndpoint: AIEndpoint = {
+  base_url: '',
+  model: '',
+  api_key: '',
+  has_api_key: false,
+  timeout_ms: 15000,
+  max_concurrency: 16,
+}
+
+const config = ref<GuardConfig>(cloneConfig(defaultConfig))
+const endpoint = ref<AIEndpoint>({ ...defaultEndpoint })
+const savedConfig = ref<GuardConfig>(cloneConfig(defaultConfig))
+const savedEndpoint = ref<AIEndpoint>({ ...defaultEndpoint })
+const configSnapshot = ref('')
+const endpointSnapshot = ref('')
+const loading = ref(true)
+const savingConfig = ref(false)
+const savingEndpoint = ref(false)
+const testing = ref(false)
+const showKey = ref(false)
+const error = ref('')
+const testResult = ref<{ ok: boolean; message: string; latency?: number } | null>(null)
+const toast = useToast()
+
+const configDirty = computed(() => configSnapshot.value !== serializeConfig(config.value))
+const endpointDirty = computed(() => endpointSnapshot.value !== serializeEndpoint(endpoint.value))
+const bodyLimitMB = computed({
+  get: () => Math.round(config.value.max_body_bytes / 1024 / 1024),
+  set: (value: number) => {
+    config.value.max_body_bytes = Math.max(1, Number(value) || 1) * 1024 * 1024
+  },
+})
+
+function cloneConfig(value: GuardConfig): GuardConfig {
+  return { ...value, protected_paths: [...value.protected_paths], ai_endpoint: undefined }
+}
+
+function serializeConfig(value: GuardConfig) {
+  return JSON.stringify(cloneConfig(value))
+}
+
+function serializeEndpoint(value: AIEndpoint) {
+  return JSON.stringify({ ...value, api_key: value.api_key ? '__changed__' : '' })
+}
+
+function applyConfig(value: GuardConfig) {
+  const normalized = cloneConfig({
+    ...defaultConfig,
+    ...value,
+    mode: 'permissive',
+    protected_paths: value.protected_paths?.length ? value.protected_paths : defaultConfig.protected_paths,
+  })
+  config.value = cloneConfig(normalized)
+  savedConfig.value = cloneConfig(normalized)
+  configSnapshot.value = serializeConfig(normalized)
+}
+
+function applyEndpoint(value?: AIEndpoint) {
+  const normalized = { ...defaultEndpoint, ...(value || {}), api_key: '' }
+  endpoint.value = { ...normalized }
+  savedEndpoint.value = { ...normalized }
+  endpointSnapshot.value = serializeEndpoint(normalized)
+  showKey.value = false
+}
+
+async function load() {
+  loading.value = true
+  error.value = ''
+  testResult.value = null
+  try {
+    const loaded = await api.getConfig()
+    applyConfig(loaded)
+    applyEndpoint(loaded.ai_endpoint)
+  } catch (requestError) {
+    error.value = requestError instanceof ApiError ? requestError.message : '无法加载系统配置'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function saveConfig() {
+  savingConfig.value = true
+  try {
+    const saved = await api.updateConfig(cloneConfig(config.value))
+    applyConfig(saved)
+    toast.show('Guard 配置已保存')
+  } catch (requestError) {
+    if (requestError instanceof ApiError && requestError.status === 409) {
+      toast.show('Guard 配置已被其他管理员更新', { detail: '请重新加载后再保存。AI 节点未受影响。', tone: 'error' })
+    } else {
+      toast.show('Guard 配置保存失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+    }
+  } finally {
+    savingConfig.value = false
+  }
+}
+
+async function saveEndpoint() {
+  if (!endpoint.value.base_url.trim() || !endpoint.value.model.trim()) {
+    toast.show('请补全审核节点配置', { tone: 'error' })
+    return
+  }
+  savingEndpoint.value = true
+  try {
+    const saved = await api.updateAIEndpoint({
+      ...endpoint.value,
+      base_url: endpoint.value.base_url.trim(),
+      model: endpoint.value.model.trim(),
+    })
+    applyEndpoint(saved)
+    testResult.value = null
+    toast.show('AI 节点已保存')
+  } catch (requestError) {
+    toast.show('AI 节点保存失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    savingEndpoint.value = false
+  }
+}
+
+async function testEndpoint() {
+  if (!endpoint.value.base_url.trim() || !endpoint.value.model.trim()) {
+    toast.show('请先填写节点地址和模型', { tone: 'error' })
+    return
+  }
+  testing.value = true
+  testResult.value = null
+  try {
+    const result = await api.testAIEndpoint(endpoint.value)
+    testResult.value = {
+      ok: result.ok,
+      message: result.message || (result.ok ? '节点响应正常' : '节点测试未通过'),
+      latency: result.latency_ms,
+    }
+  } catch (requestError) {
+    testResult.value = { ok: false, message: requestError instanceof ApiError ? requestError.message : '节点连接失败' }
+  } finally {
+    testing.value = false
+  }
+}
+
+function resetConfig() {
+  config.value = cloneConfig(savedConfig.value)
+}
+
+function resetEndpoint() {
+  endpoint.value = { ...savedEndpoint.value }
+  testResult.value = null
+  showKey.value = false
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <section class="page-view settings-view">
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">CONFIGURATION / RUNTIME</p>
+        <h1>系统设置</h1>
+        <p class="page-subtitle">分别管理 Guard 运行配置与 AI 审核节点。</p>
+      </div>
+      <span class="version-chip">配置版本 v{{ config.version }}</span>
+    </div>
+
+    <div v-if="error" class="error-banner" role="alert">
+      <AlertTriangle :size="18" />{{ error }}
+      <button type="button" class="text-button" @click="load">重试</button>
+    </div>
+    <div v-if="loading" class="loading-state"><span class="loader" />加载配置…</div>
+
+    <template v-else>
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <div class="section-icon"><ShieldCheck :size="19" /></div>
+          <div><h2>Guard 策略</h2><p>请求审核的全局行为</p></div>
+        </div>
+        <div class="settings-fields">
+          <div class="setting-row">
+            <div><label for="guard-enabled">启用审核</label><p>关闭后所有请求直接转发到上游。</p></div>
+            <label class="switch"><input id="guard-enabled" v-model="config.enabled" type="checkbox" /><span /></label>
+          </div>
+          <div class="setting-row">
+            <div><label>运行模式</label><p>仅明确风险 Hash 或 AI reject 时阻断。</p></div>
+            <div class="segmented-control"><button class="active" type="button">宽松模式</button></div>
+          </div>
+          <div class="setting-row">
+            <div><label>未知客户端</label><p>未命中 User-Agent 规则时不进入审核。</p></div>
+            <span class="readonly-value">默认放行</span>
+          </div>
+          <div class="setting-row">
+            <div><label>普通事件</label><p>仅保存元数据，不包含指令原文。</p></div>
+            <span class="readonly-value">保留 {{ config.event_retention_days }} 天</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <div class="section-icon orange"><Link2 :size="19" /></div>
+          <div><h2>反向代理</h2><p>目标服务与请求边界</p></div>
+        </div>
+        <div class="settings-form-grid">
+          <label class="field-label span-2" for="upstream-url">
+            上游服务地址
+            <input id="upstream-url" v-model="config.upstream_url" type="url" readonly aria-readonly="true" />
+            <span class="field-help">由启动配置 NCG_UPSTREAM_URL 固定，修改后需重启容器。</span>
+          </label>
+          <label class="field-label" for="request-timeout">
+            审核总超时（毫秒）
+            <input id="request-timeout" v-model.number="config.request_timeout_ms" type="number" min="100" max="30000" step="100" />
+          </label>
+          <label class="field-label" for="body-limit">
+            请求体上限（MB）
+            <input id="body-limit" v-model.number="bodyLimitMB" type="number" min="1" max="64" />
+          </label>
+          <div class="field-label span-2">
+            <span>受保护路径</span>
+            <div v-for="protectedPath in config.protected_paths" :key="protectedPath" class="protected-path">
+              <code>{{ protectedPath }}</code><span>v0.1</span>
+            </div>
+            <span class="field-help">其他路径保持透明转发。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <div class="section-icon gray"><Server :size="19" /></div>
+          <div><h2>事件存储</h2><p>SQLite 本地记录策略</p></div>
+        </div>
+        <div class="settings-form-grid">
+          <label class="field-label" for="retention-days">
+            保留天数
+            <input id="retention-days" v-model.number="config.event_retention_days" type="number" min="1" max="3650" />
+          </label>
+          <div class="storage-note"><KeyRound :size="18" /><div><strong>敏感字段保护</strong><span>节点密钥不会在接口响应中返回。</span></div></div>
+        </div>
+      </section>
+
+      <div class="settings-savebar" aria-live="polite">
+        <div>
+          <span v-if="configDirty" class="unsaved-dot" />
+          <strong>{{ configDirty ? 'Guard 配置有未保存的更改' : 'Guard 配置已同步' }}</strong>
+          <small>{{ configDirty ? '保存后新请求立即生效' : `当前为 v${config.version}` }}</small>
+        </div>
+        <div>
+          <button type="button" class="secondary-button" :disabled="!configDirty || savingConfig" @click="resetConfig"><RefreshCw :size="15" />重置</button>
+          <button type="button" class="primary-button" :disabled="!configDirty || savingConfig" :aria-busy="savingConfig" @click="saveConfig">
+            <LoaderCircle v-if="savingConfig" class="spin" :size="16" /><Save v-else :size="16" />{{ savingConfig ? '保存中…' : '保存 Guard 配置' }}
+          </button>
+        </div>
+      </div>
+
+      <section class="settings-section ai-settings-section">
+        <div class="settings-section-title">
+          <div class="section-icon purple"><Zap :size="19" /></div>
+          <div><h2>AI 审核节点</h2><p>OpenAI-compatible Chat Completions</p></div>
+          <button type="button" class="secondary-button section-action" :disabled="testing || savingEndpoint" :aria-busy="testing" @click="testEndpoint">
+            <LoaderCircle v-if="testing" class="spin" :size="16" /><TestTube2 v-else :size="16" />{{ testing ? '测试中…' : '测试连接' }}
+          </button>
+        </div>
+        <div v-if="testResult" class="test-result" :class="{ success: testResult.ok, failed: !testResult.ok }" role="status">
+          <Check v-if="testResult.ok" :size="17" /><AlertTriangle v-else :size="17" />
+          <span>{{ testResult.message }}</span><strong v-if="testResult.latency != null">{{ testResult.latency }} ms</strong>
+        </div>
+        <div class="settings-form-grid">
+          <label class="field-label span-2" for="ai-url">Base URL<input id="ai-url" v-model="endpoint.base_url" type="url" placeholder="https://api.example.com/v1" /></label>
+          <label class="field-label" for="ai-model">模型<input id="ai-model" v-model="endpoint.model" placeholder="gpt-4.1-mini" /></label>
+          <label class="field-label" for="ai-key">
+            API Key <span v-if="endpoint.has_api_key" class="field-hint">已配置</span>
+            <div class="input-with-action">
+              <input id="ai-key" v-model="endpoint.api_key" :type="showKey ? 'text' : 'password'" autocomplete="new-password" :placeholder="endpoint.has_api_key ? '留空以保留现有密钥' : '输入节点密钥'" />
+              <button type="button" :aria-label="showKey ? '隐藏密钥' : '显示密钥'" @click="showKey = !showKey"><EyeOff v-if="showKey" :size="16" /><Eye v-else :size="16" /></button>
+            </div>
+          </label>
+          <label class="field-label" for="ai-timeout">单次超时（毫秒）<input id="ai-timeout" v-model.number="endpoint.timeout_ms" type="number" min="100" max="30000" step="100" /></label>
+          <label class="field-label" for="ai-concurrency">最大并发<input id="ai-concurrency" v-model.number="endpoint.max_concurrency" type="number" min="1" max="256" /></label>
+        </div>
+        <div class="settings-section-footer" aria-live="polite">
+          <span>{{ endpointDirty ? 'AI 节点有未保存的更改' : 'AI 节点配置已同步' }}</span>
+          <div>
+            <button type="button" class="secondary-button" :disabled="!endpointDirty || savingEndpoint" @click="resetEndpoint"><RefreshCw :size="15" />重置</button>
+            <button type="button" class="primary-button" :disabled="!endpointDirty || savingEndpoint" :aria-busy="savingEndpoint" @click="saveEndpoint">
+              <LoaderCircle v-if="savingEndpoint" class="spin" :size="16" /><Save v-else :size="16" />{{ savingEndpoint ? '保存中…' : '保存 AI 节点' }}
+            </button>
+          </div>
+        </div>
+      </section>
+    </template>
+  </section>
+</template>
