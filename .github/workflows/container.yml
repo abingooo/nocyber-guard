@@ -131,6 +131,7 @@ jobs:
           vuln-type: os,library
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
           exit-code: "1"
 
       - name: Preserve scan report
