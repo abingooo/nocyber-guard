@@ -10,11 +10,12 @@ through.
 ## Quick start
 
 ```sh
-mkdir -p /data/nocyber-guard/data
-# Choose a verified server profile (use tianliyun.env.example on tianliyun).
+# Choose a verified server profile (this example is for ZeusA).
 cp deploy/zeusa.env.example .env
+# Use deploy/tianliyun.env.example on tianliyun instead.
 # Set NCG_UPSTREAM_URL and choose direct values or the documented file mode
 # for NCG_MASTER_KEY and NCG_INITIAL_ADMIN_PASSWORD.
+mkdir -p /opt/nocyber-guard-main/data
 docker compose --env-file .env up -d
 curl -fsS http://127.0.0.1:18087/_nocyber/readyz
 ```
