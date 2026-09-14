@@ -16,7 +16,7 @@ cp deploy/zeusa.env.example .env
 # Set NCG_UPSTREAM_URL and choose direct values or the documented file mode
 # for NCG_MASTER_KEY and NCG_INITIAL_ADMIN_PASSWORD.
 docker compose --env-file .env up -d
-curl -fsS http://127.0.0.1:18086/_nocyber/readyz
+curl -fsS http://127.0.0.1:18087/_nocyber/readyz
 ```
 
 The proxy and administrator ports are controlled by `NCG_PROXY_PORT` and
