@@ -11,8 +11,8 @@ through.
 
 ```sh
 mkdir -p /data/nocyber-guard/data
-# Copy the generic profile, or use the verified tianliyun/ZeusA profile.
-cp deploy/.env.example .env
+# Choose a verified server profile (use tianliyun.env.example on tianliyun).
+cp deploy/zeusa.env.example .env
 # Set NCG_UPSTREAM_URL and choose direct values or the documented file mode
 # for NCG_MASTER_KEY and NCG_INITIAL_ADMIN_PASSWORD.
 docker compose --env-file .env up -d
