@@ -41,6 +41,7 @@ type runtime struct {
 	logger         *slog.Logger
 	reloadMu       sync.Mutex
 	bulkhead       *audit.ConcurrencyGate
+	asyncRunner    *asyncRuntime
 }
 
 type runtimeState struct {
@@ -56,6 +57,129 @@ type ruleSnapshot map[string]audit.HashMatch
 func (rules ruleSnapshot) LookupHash(_ context.Context, sha string) (audit.HashMatch, bool, error) {
 	match, found := rules[sha]
 	return match, found, nil
+}
+
+type asyncReviewJob struct {
+	Hash    string
+	Field   string
+	Content string
+	Sampled bool
+	Model   string
+}
+
+type asyncRuntime struct {
+	store       *storage.Store
+	logger      *slog.Logger
+	queue       chan asyncReviewJob
+	mu          sync.RWMutex
+	nodes       []audit.AsyncNodeReviewer
+	stop        chan struct{}
+	done        chan struct{}
+	onPromotion func(context.Context) error
+}
+
+func newAsyncRuntime(store *storage.Store, logger *slog.Logger) *asyncRuntime {
+	return &asyncRuntime{store: store, logger: logger, queue: make(chan asyncReviewJob, 256), stop: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (ar *asyncRuntime) setNodes(nodes []audit.AsyncNodeReviewer) {
+	ar.mu.Lock()
+	ar.nodes = append([]audit.AsyncNodeReviewer(nil), nodes...)
+	ar.mu.Unlock()
+}
+
+func (ar *asyncRuntime) snapshotNodes() []audit.AsyncNodeReviewer {
+	ar.mu.RLock()
+	defer ar.mu.RUnlock()
+	return append([]audit.AsyncNodeReviewer(nil), ar.nodes...)
+}
+
+func (ar *asyncRuntime) enqueue(job asyncReviewJob) bool {
+	select {
+	case ar.queue <- job:
+		return true
+	default:
+		ar.logger.Warn("async_review_queue_full", "sha256", job.Hash)
+		return false
+	}
+}
+
+func (ar *asyncRuntime) start() {
+	go func() {
+		defer close(ar.done)
+		for {
+			select {
+			case <-ar.stop:
+				return
+			case job := <-ar.queue:
+				ar.process(job)
+			}
+		}
+	}()
+}
+
+func (ar *asyncRuntime) close() {
+	close(ar.stop)
+	<-ar.done
+}
+
+func (ar *asyncRuntime) process(job asyncReviewJob) {
+	nodes := ar.snapshotNodes()
+	if len(nodes) != 3 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Sampled)
+	if err != nil || !created {
+		return
+	}
+	votes := audit.ReviewAsync(ctx, nodes, audit.AIReviewRequest{Field: job.Field, Content: job.Content, Sampled: job.Sampled, Model: job.Model, Criteria: audit.DefaultEngineConfig().ReviewCriteria})
+	for _, vote := range votes {
+		row := storage.ReviewVote{JobID: record.ID, NodeSlot: vote.Slot, LatencyMS: vote.Latency.Milliseconds()}
+		if vote.Err != nil {
+			row.Error = vote.Err.Error()
+		} else {
+			row.Result = string(vote.Verdict.Result)
+			row.Confidence = vote.Verdict.Confidence
+			row.Reason = vote.Verdict.Reason
+			row.Category = vote.Verdict.Category
+		}
+		if err := ar.store.RecordReviewVote(ctx, row); err != nil {
+			ar.logger.Warn("async_vote_write_failed", "job_id", record.ID, "error", err)
+		}
+	}
+	kind, promoted := audit.QuorumPromotion(votes, len(nodes), audit.DefaultRejectConfidence)
+	if promoted {
+		summary := makeVoteSummary(votes)
+		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, summary); err != nil {
+			ar.logger.Warn("async_rule_promotion_failed", "job_id", record.ID, "error", err)
+			_ = ar.store.CompleteReviewJob(ctx, record.ID, "failed", "")
+			return
+		}
+		_ = ar.store.CompleteReviewJob(ctx, record.ID, "promoted", kind)
+		if ar.onPromotion != nil {
+			reloadCtx, cancelReload := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := ar.onPromotion(reloadCtx); err != nil {
+				ar.logger.Warn("async_rule_reload_failed", "error", err)
+			}
+			cancelReload()
+		}
+	} else {
+		_ = ar.store.CompleteReviewJob(ctx, record.ID, "completed", "")
+	}
+}
+
+func makeVoteSummary(votes []audit.AsyncVote) string {
+	parts := make([]string, 0, len(votes))
+	for _, vote := range votes {
+		if vote.Err != nil {
+			parts = append(parts, vote.Slot+":error")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%.3f", vote.Slot, vote.Verdict.Result, vote.Verdict.Confidence))
+	}
+	return strings.Join(parts, ",")
 }
 
 func main() {
@@ -79,6 +203,10 @@ func main() {
 	}
 	seedProfiles(ctx, store)
 	rt := &runtime{store: store, limiter: audit.NewFixedWindowLimiter(60, time.Minute), bulkhead: audit.NewConcurrencyGate(audit.DefaultAIConcurrency), fingerprintKey: append([]byte(nil), cfg.MasterKey...), trustedProxies: parseTrustedCIDRs(cfg.TrustedProxyCIDRs), events: make(chan audit.Event, 2048), logger: logger}
+	rt.asyncRunner = newAsyncRuntime(store, logger)
+	rt.asyncRunner.onPromotion = func(reloadCtx context.Context) error { return rt.reload(reloadCtx, logger) }
+	rt.asyncRunner.start()
+	defer rt.asyncRunner.close()
 	rt.startEventWriter()
 	defer rt.stopEventWriter()
 	rt.cfg.Store(cfg)
@@ -166,6 +294,33 @@ func (rt *runtime) reload(ctx context.Context, logger *slog.Logger) error {
 	endpoint, err := rt.store.GetAIEndpoint(ctx)
 	if err != nil {
 		return err
+	}
+	asyncNodes, err := rt.store.ListAINodes(ctx)
+	if err != nil {
+		return err
+	}
+	asyncReviewers := make([]audit.AsyncNodeReviewer, 0, len(asyncNodes))
+	for _, node := range asyncNodes {
+		if !node.Enabled || !node.HasAPIKey {
+			continue
+		}
+		nodeURL, parseErr := url.Parse(node.BaseURL)
+		if parseErr != nil {
+			continue
+		}
+		if parseErr = config.ValidateEndpointAgainstListeners(nodeURL, cfg.ListenAddr, cfg.AdminListenAddr); parseErr != nil {
+			logger.Warn("async_ai_node_disabled", "slot", node.Slot, "error", parseErr)
+			continue
+		}
+		reviewer, reviewerErr := audit.NewOpenAIReviewer(audit.OpenAIReviewerConfig{BaseURL: node.BaseURL, Model: node.Model, APIKey: node.APIKey, Timeout: time.Duration(node.TimeoutMS) * time.Millisecond})
+		if reviewerErr != nil {
+			logger.Warn("async_ai_node_disabled", "slot", node.Slot, "error", reviewerErr)
+			continue
+		}
+		asyncReviewers = append(asyncReviewers, audit.AsyncNodeReviewer{Slot: node.Slot, Reviewer: reviewer})
+	}
+	if rt.asyncRunner != nil {
+		rt.asyncRunner.setNodes(asyncReviewers)
 	}
 	var reviewer audit.Reviewer
 	if endpoint.BaseURL != "" && endpoint.Model != "" && endpoint.HasAPIKey {
@@ -301,6 +456,14 @@ func (a auditorAdapter) Evaluate(ctx context.Context, req *http.Request, body []
 	}
 	id := eventRequestID(req.Header.Get("X-Request-ID"))
 	result := state.engine.Evaluate(ctx, audit.Request{ID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: audit.ProtocolResponses, UserAgent: req.UserAgent(), Body: body, APIKeyFingerprint: a.apiKeyFingerprint(req.Header.Get("Authorization")), ClientIP: a.clientIP(req)})
+	// Async quorum review is deliberately detached from the request path. It
+	// never changes the current decision and only promotes rules for later
+	// requests after a complete vote is persisted.
+	if a.runtime.asyncRunner != nil && result.Hash != "" && result.Field != "" && result.Reason != audit.ReasonTrustedHashMatch && result.Reason != audit.ReasonRiskHashMatch {
+		if result.ReviewContent != "" {
+			a.runtime.asyncRunner.enqueue(asyncReviewJob{Hash: result.Hash, Field: result.Field, Content: result.ReviewContent, Sampled: result.AISampled, Model: result.Model})
+		}
+	}
 	return proxy.Decision{Allow: result.Allow, Blocked: result.Blocked, Reason: string(result.Reason), RequestID: id, AuditMs: result.AuditLatency.Milliseconds(), UAProfile: result.ProfileKey, Field: result.Field, Hash: result.Hash, Model: result.Model}, nil
 }
 func (a auditorAdapter) Observe(_ context.Context, req *http.Request, reason string) {

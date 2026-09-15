@@ -1,5 +1,6 @@
 import type {
   AIEndpoint,
+  AINode,
   ApiEnvelope,
   AuditEvent,
   ClientProfile,
@@ -143,6 +144,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(endpoint),
     }),
+  updateAINodes: (nodes: AINode[]) =>
+    request<{ items: AINode[] }>('/ai-nodes', { method: 'PUT', body: JSON.stringify({ nodes }) }),
+  testAINode: (slot: AINode['slot']) =>
+    request<{ ok: boolean; latency_ms?: number; message?: string }>(`/ai-nodes/${encodeURIComponent(slot)}/test`, { method: 'POST', body: '{}' }),
 }
 
 export const apiInternals = { unwrap, queryString, readCookie }

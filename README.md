@@ -2,10 +2,14 @@
 
 NoCyber Guard is a small, transparent instruction-audit gateway for
 Sub2API, New API, and other OpenAI-compatible gateways. It sits in front of an
-upstream and forwards requests unchanged after the audit decision. The v0.1
+upstream and forwards requests unchanged after the audit decision. The v0.2
 default is permissive: only an explicit risk decision blocks a request;
 unknown clients, parse failures, and reviewer outages are recorded and passed
-through.
+through. Three independent asynchronous reviewers can now vote after a
+request finishes. A high-confidence 2/3 reject vote automatically promotes
+the prompt hash to the risk library; 3/3 high-confidence pass promotes it to
+the trusted library. Promotions affect subsequent requests and do not require
+manual approval.
 
 ## Quick start
 
@@ -33,7 +37,7 @@ not commit the value. `NCG_MASTER_KEY_FILE` and
 files; do not define the corresponding direct variable, even as an empty
 string, when using file mode. Local Compose file secrets are bind mounts, so
 make their host files owned by UID/GID `65532` with mode `0400`. The initial
-administrator password is consumed on first initialization. v0.1 does not
+administrator password is consumed on first initialization. v0.2 does not
 expose a password-change endpoint; changing it later requires a separately
 controlled offline administration procedure.
 
@@ -61,7 +65,7 @@ any request bytes were sent. Do not add `non_idempotent` or HTTP response
 status codes to that retry policy.
 
 Keep `Upgrade`, `Connection`, `X-Forwarded-*`, request buffering, and long read
-timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.1
+timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.2
 audits the OpenAI Responses HTTP paths listed in `compatibility.json`; it does
 not inspect WebSocket frames or Chat Completions/Messages bodies.
 
@@ -103,7 +107,7 @@ blindly switch databases or replay POSTs; reconcile the audit records first.
 
 ## Migrating legacy ModelPort V2 rules
 
-v0.1 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
+v0.2 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
 vault, AI-node credentials, users, or events. The old V2 implementation uses
 platform-specific group/profile scopes and encrypted evidence that cannot be
 copied safely into an independent product.
@@ -118,7 +122,10 @@ accept, print, or store a password or API key. Review and validate the export
 before import, and repeat it immediately before a production cutover.
 
 The selected AI endpoint URL, model, timeout, and concurrency are transferable;
-its credential must be entered separately in Guard. Do not copy
+its credential must be entered separately in Guard. The three asynchronous
+nodes are configured through the authenticated `PUT /api/v1/ai-nodes` API;
+each node needs a distinct slot (`async_1`, `async_2`, `async_3`), endpoint,
+model, and API key. Do not copy
 `raw_ciphertext`, `api_key_ciphertext`, evidence vault rows, or foreign-key IDs
 from ModelPort.
 

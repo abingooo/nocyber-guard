@@ -92,6 +92,7 @@ export interface GuardConfig {
   max_body_bytes: number
   event_retention_days: number
   ai_endpoint?: AIEndpoint
+  async_nodes?: AINode[]
 }
 
 export interface AIEndpoint {
@@ -101,6 +102,18 @@ export interface AIEndpoint {
   has_api_key: boolean
   timeout_ms: number
   max_concurrency: number
+}
+
+export interface AINode {
+  id?: number | string
+  slot: 'async_1' | 'async_2' | 'async_3'
+  name: string
+  base_url: string
+  model: string
+  api_key?: string
+  has_api_key: boolean
+  timeout_ms: number
+  enabled: boolean
 }
 
 export interface LoginResponse {

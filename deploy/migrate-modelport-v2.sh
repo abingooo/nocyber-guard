@@ -18,8 +18,9 @@ Environment:
   NCG_ADMIN_CSRF_TOKEN_FILE   Optional file containing the ncg_csrf value
 
 Export is repeatable-read and read-only. It includes only global active
-trusted hashes, all active risk hashes, the three enabled Codex profiles, and
-the highest-priority enabled synchronous AI-node metadata. Scoped trusted
+trusted hashes, all active risk hashes, the three enabled Codex profiles, the
+highest-priority enabled synchronous AI-node metadata, and three enabled
+asynchronous AI-node metadata rows. Scoped trusted
 rules are counted but skipped. Prompt evidence, users, events, and all AI
 credentials are excluded.
 EOF
@@ -53,13 +54,22 @@ validate_export() {
          (.timeout_ms | type == "number" and . > 0) and
          (.max_concurrency | type == "number" and . > 0) and
          (.source_had_api_key | type == "boolean"));
+      def async_ai_row:
+        (.kind == "ai_async_node" and
+         (.slot == "async_1" or .slot == "async_2" or .slot == "async_3") and
+         (.name | type == "string") and
+         (.base_url | type == "string" and test("^https?://")) and
+         (.model | type == "string" and length > 0) and
+         (.timeout_ms | type == "number" and . > 0) and
+         (.source_had_api_key | type == "boolean"));
       ([.[] | select(.kind == "_meta")][0]) as $meta |
       type == "array" and
       (map(select(.kind == "_meta")) | length) == 1 and
-      all(.[]; (.kind == "_meta") or hash_row or profile_row or ai_row) and
+      all(.[]; (.kind == "_meta") or hash_row or profile_row or ai_row or async_ai_row) and
       ([.[] | select(.kind == "client_profile") | .profile_key] | sort) ==
         ["codex_cli", "codex_desktop", "codex_vscode"] and
       ([.[] | select(.kind == "ai_endpoint")] | length) == 1 and
+      ([.[] | select(.kind == "ai_async_node")] | map(.slot) | sort) == ["async_1","async_2","async_3"] and
       ([.[] | select(.kind == "trusted") | .sha256] | length) ==
         ([.[] | select(.kind == "trusted") | .sha256] | unique | length) and
       ([.[] | select(.kind == "risk") | .sha256] | length) ==
@@ -70,7 +80,7 @@ validate_export() {
       $meta.trusted_count == ([.[] | select(.kind == "trusted")] | length) and
       $meta.risk_count == ([.[] | select(.kind == "risk")] | length) and
       $meta.client_profile_count == 3 and
-      $meta.sync_ai_node_count >= 1
+      $meta.sync_ai_node_count >= 1 and $meta.async_ai_node_count >= 3
     ' "$1" >/dev/null
 }
 
@@ -126,7 +136,8 @@ SELECT json_build_object(
   'trusted_count',(SELECT count(*) FROM instruction_audit_v2_hashes WHERE status='active' AND global_trust),
   'risk_count',(SELECT count(*) FROM instruction_audit_v2_risk_hashes WHERE status='active'),
   'client_profile_count',(SELECT count(*) FROM instruction_audit_v2_client_profiles WHERE enabled AND profile_key IN ('codex_vscode','codex_cli','codex_desktop')),
-  'sync_ai_node_count',(SELECT count(*) FROM instruction_audit_v2_ai_nodes WHERE enabled AND slot='sync')
+  'sync_ai_node_count',(SELECT count(*) FROM instruction_audit_v2_ai_nodes WHERE enabled AND slot='sync'),
+  'async_ai_node_count',(SELECT count(*) FROM instruction_audit_v2_ai_nodes WHERE enabled AND slot IN ('async_1','async_2','async_3'))
 );
 SELECT json_build_object(
   'kind','trusted','sha256',lower(sha256),
@@ -154,6 +165,12 @@ FROM instruction_audit_v2_ai_nodes
 WHERE enabled AND slot='sync'
 ORDER BY priority,id
 LIMIT 1;
+SELECT json_build_object(
+  'kind','ai_async_node','slot',slot,'name',name,'base_url',base_url,'model',model,
+  'timeout_ms',timeout_ms,'source_had_api_key',(btrim(api_key_ciphertext)<>''))
+FROM instruction_audit_v2_ai_nodes
+WHERE enabled AND slot IN ('async_1','async_2','async_3')
+ORDER BY slot,priority,id;
 COMMIT;
 SQL
 
@@ -165,7 +182,7 @@ SQL
         skipped_rules=$(jq -r 'map(select(.kind == "_meta"))[0].skipped_non_global_trusted' "$normalized_file")
         skipped_scopes=$(jq -r 'map(select(.kind == "_meta"))[0].skipped_hash_scopes' "$normalized_file")
         mv "$normalized_file" "$output"
-        printf 'Export complete: trusted=%s risk=%s profiles=3 ai_nodes=1 skipped_scoped_rules=%s skipped_scope_rows=%s. No content or credentials were copied.\n' \
+        printf 'Export complete: trusted=%s risk=%s profiles=3 ai_nodes=4 skipped_scoped_rules=%s skipped_scope_rows=%s. No content or credentials were copied.\n' \
             "$trusted" "$risk" "$skipped_rules" "$skipped_scopes"
         ;;
     validate)
@@ -312,13 +329,28 @@ SQL
             fi
         fi
 
+        async_nodes_file=$work_dir/async_nodes.json
+        jq -s '[.[] | select(.kind == "ai_async_node") | {slot,name,base_url,model,api_key:"",timeout_ms,enabled:true}]' "$input" >"$async_nodes_file"
+        async_current=$(jq -Sc '[.async_nodes[] | {slot,name,base_url,model,timeout_ms,enabled}] | sort_by(.slot)' "$config_file")
+        async_desired=$(jq -Sc 'sort_by(.slot)' "$async_nodes_file")
+        async_updated=0
+        async_skipped=0
+        if [ "$async_current" = "$async_desired" ]; then
+            async_skipped=1
+        else
+            async_updated=1
+            if [ "$dry_run" = false ]; then
+                write_json PUT /api/v1/ai-nodes "$(jq -c '{nodes:.}' "$async_nodes_file")"
+            fi
+        fi
+
         if [ "$dry_run" = true ]; then
             prefix='Dry run complete'
         else
             prefix='Import complete'
         fi
-        printf '%s: rules_create=%s rules_skip=%s profiles_create=%s profiles_update=%s profiles_skip=%s ai_update=%s ai_skip=%s. AI credentials were not imported; enter the key in Guard before enabling AI review.\n' \
-            "$prefix" "$rules_created" "$rules_skipped" "$profiles_created" "$profiles_updated" "$profiles_skipped" "$ai_updated" "$ai_skipped"
+        printf '%s: rules_create=%s rules_skip=%s profiles_create=%s profiles_update=%s profiles_skip=%s ai_update=%s ai_skip=%s async_update=%s async_skip=%s. AI credentials were not imported; enter the keys in Guard before enabling AI review.\n' \
+            "$prefix" "$rules_created" "$rules_skipped" "$profiles_created" "$profiles_updated" "$profiles_skipped" "$ai_updated" "$ai_skipped" "$async_updated" "$async_skipped"
         ;;
     *) usage ;;
 esac

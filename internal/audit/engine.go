@@ -175,7 +175,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Result {
 	field = PrepareAISample(field, engine.config.MaxPromptRunes)
 	base := Result{
 		Allow: true, ProfileKey: profile.Key, Field: fieldName, Hash: field.SHA256,
-		PromptBytes: field.Bytes, PromptRunes: field.Runes, AISampled: field.AISampled, Model: request.Model,
+		PromptBytes: field.Bytes, PromptRunes: field.Runes, AISampled: field.AISampled, ReviewContent: field.AISample, Model: request.Model,
 	}
 
 	if engine.rules != nil {

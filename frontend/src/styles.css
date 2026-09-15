@@ -15,3 +15,4 @@
 /* Keyboard-visible controls and high-contrast labels for the compact console. */
 .switch input:focus-visible+span{outline:3px solid #087f8c55;outline-offset:3px}.page-heading h1{letter-spacing:0}
 @media(prefers-color-scheme:dark){.filter-grid label,.field-label{color:var(--text)}}
+.async-node-card{border:1px solid var(--line);border-radius:7px;padding:15px;margin-top:12px}.async-node-heading{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:12px}.async-node-heading span{color:var(--muted)}.async-node-heading .secondary-button{margin-left:auto;padding:7px 10px}.checkbox-field{display:flex;align-items:center;gap:8px;padding-top:25px}.checkbox-field input{width:auto!important;accent-color:var(--sea)}

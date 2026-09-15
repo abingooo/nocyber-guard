@@ -79,6 +79,27 @@ func TestAIEndpointValidationAppliesToSaveAndTest(t *testing.T) {
 	assertErrorCode(t, rr, http.StatusBadRequest, "invalid_ai_config")
 }
 
+func TestAsyncNodesAcceptSecretsButNeverReturnThem(t *testing.T) {
+	store, handler, session, csrf := newAuthenticatedAdmin(t)
+	input := map[string]any{"nodes": []map[string]any{
+		{"slot": "async_1", "name": "one", "base_url": "https://one.example/v1", "model": "m1", "api_key": "secret-one", "timeout_ms": 15000, "enabled": true},
+		{"slot": "async_2", "name": "two", "base_url": "https://two.example/v1", "model": "m2", "api_key": "secret-two", "timeout_ms": 15000, "enabled": true},
+		{"slot": "async_3", "name": "three", "base_url": "https://three.example/v1", "model": "m3", "api_key": "secret-three", "timeout_ms": 15000, "enabled": true},
+	}}
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/ai-nodes", input)
+	if rr.Code != http.StatusOK || bytes.Contains(rr.Body.Bytes(), []byte("secret-one")) {
+		t.Fatalf("async node response status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	nodes, err := store.ListAINodes(context.Background())
+	if err != nil || len(nodes) != 3 || nodes[0].APIKey == "" {
+		t.Fatalf("stored async nodes=%+v err=%v", nodes, err)
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/ai-nodes", nil)
+	if rr.Code != http.StatusOK || bytes.Contains(rr.Body.Bytes(), []byte("secret-")) {
+		t.Fatalf("async node GET status=%d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
 func TestConfigUsesFixedUpstreamAndRejectsInvalidUpdates(t *testing.T) {
 	store, handler, session, csrf := newAuthenticatedAdmin(t)
 	ctx := context.Background()

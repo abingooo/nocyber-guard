@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, v
 CREATE TABLE IF NOT EXISTS admin_users(id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash BLOB NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_endpoints(id INTEGER PRIMARY KEY CHECK(id=1), base_url TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', api_key BLOB NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 15000, max_concurrency INTEGER NOT NULL DEFAULT 16, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, slot TEXT NOT NULL UNIQUE, name TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL, model TEXT NOT NULL, api_key BLOB NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 15000, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ai_nodes_enabled_idx ON ai_nodes(enabled,slot);
 CREATE TABLE IF NOT EXISTS client_profiles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 100, matchers_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
@@ -97,6 +99,10 @@ CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at D
 CREATE INDEX IF NOT EXISTS audit_events_reason_idx ON audit_events(reason);
 CREATE TABLE IF NOT EXISTS blocked_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL REFERENCES audit_events(id) ON DELETE CASCADE, field_name TEXT NOT NULL, content TEXT NOT NULL, partial INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS review_jobs_created_idx ON review_jobs(created_at DESC);
+CREATE TABLE IF NOT EXISTS review_votes(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, node_slot TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(job_id,node_slot));
+CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, kind TEXT NOT NULL, vote_summary TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_id,kind));
 `)
 	if err != nil {
 		return err
@@ -127,7 +133,11 @@ CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 	if _, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,?)", now); err != nil {
 		return err
 	}
-	return s.migrateEventContractV2(ctx, now)
+	if err := s.migrateEventContractV2(ctx, now); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", now)
+	return err
 }
 
 func (s *Store) migrateEventContractV2(ctx context.Context, appliedAt string) error {
@@ -361,6 +371,10 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	return out, rows.Err()
 }
 func (s *Store) AddHash(ctx context.Context, kind, h, label string) (HashEntry, error) {
+	return s.AddHashSource(ctx, kind, h, label, "manual")
+}
+
+func (s *Store) AddHashSource(ctx context.Context, kind, h, label, source string) (HashEntry, error) {
 	if kind != "trusted" && kind != "risk" {
 		return HashEntry{}, errors.New("invalid hash kind")
 	}
@@ -371,12 +385,15 @@ func (s *Store) AddHash(ctx context.Context, kind, h, label string) (HashEntry, 
 	if len(label) > 500 || !utf8.ValidString(label) {
 		return HashEntry{}, errors.New("hash label must be valid UTF-8 and no longer than 500 bytes")
 	}
+	if source == "" || len(source) > 64 || !utf8.ValidString(source) {
+		return HashEntry{}, errors.New("hash source is invalid")
+	}
 	table := "trusted_hashes"
 	if kind == "risk" {
 		table = "risk_hashes"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,created_at) VALUES(?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,enabled=1", strings.ToLower(h), label, now)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,source,created_at) VALUES(?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,source=excluded.source,enabled=1", strings.ToLower(h), label, source, now)
 	if err != nil {
 		return HashEntry{}, err
 	}
@@ -754,6 +771,227 @@ type AIEndpoint struct {
 	MaxConcurrency int    `json:"max_concurrency"`
 }
 
+// AINode is a separately configurable reviewer. Slot "sync" is represented
+// by the legacy ai_endpoints row; async_1..async_3 are the v0.2 quorum nodes.
+type AINode struct {
+	ID        int64  `json:"id"`
+	Slot      string `json:"slot"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKey    string `json:"-"`
+	HasAPIKey bool   `json:"has_api_key"`
+	TimeoutMS int64  `json:"timeout_ms"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func ValidateAINode(n AINode) error {
+	if n.Slot != "async_1" && n.Slot != "async_2" && n.Slot != "async_3" {
+		return errors.New("AI node slot must be async_1, async_2, or async_3")
+	}
+	if len(n.Name) > 128 || !utf8.ValidString(n.Name) {
+		return errors.New("AI node name is invalid")
+	}
+	if n.BaseURL == "" {
+		return errors.New("AI node URL is required")
+	}
+	u, err := url.Parse(strings.TrimSpace(n.BaseURL))
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("AI node URL must be an absolute http or https URL without credentials, query, or fragment")
+	}
+	if strings.TrimSpace(n.Model) == "" || len(n.Model) > 256 || !utf8.ValidString(n.Model) {
+		return errors.New("AI node model is required and must be no longer than 256 bytes")
+	}
+	if n.TimeoutMS < 100 || n.TimeoutMS > 30000 {
+		return errors.New("AI node timeout_ms must be between 100 and 30000")
+	}
+	if len(n.APIKey) > 16<<10 {
+		return errors.New("AI node API key is too long")
+	}
+	return nil
+}
+
+func (s *Store) ListAINodes(ctx context.Context) ([]AINode, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id,slot,name,base_url,model,api_key,timeout_ms,enabled FROM ai_nodes ORDER BY slot")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AINode
+	for rows.Next() {
+		var n AINode
+		var key []byte
+		var enabled int
+		if err := rows.Scan(&n.ID, &n.Slot, &n.Name, &n.BaseURL, &n.Model, &key, &n.TimeoutMS, &enabled); err != nil {
+			return nil, err
+		}
+		n.Enabled = enabled != 0
+		n.HasAPIKey = len(key) > 0
+		if len(key) > 0 {
+			plain, err := s.decrypt(key)
+			if err != nil {
+				return nil, err
+			}
+			n.APIKey = string(plain)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveAINode(ctx context.Context, n AINode) error {
+	n.Slot, n.Name, n.BaseURL, n.Model = strings.TrimSpace(n.Slot), strings.TrimSpace(n.Name), strings.TrimSpace(n.BaseURL), strings.TrimSpace(n.Model)
+	if err := ValidateAINode(n); err != nil {
+		return err
+	}
+	var encrypted []byte
+	var err error
+	if n.APIKey != "" {
+		encrypted, err = s.encrypt([]byte(n.APIKey))
+		if err != nil {
+			return err
+		}
+	}
+	en := 0
+	if n.Enabled {
+		en = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO ai_nodes(slot,name,base_url,model,api_key,timeout_ms,enabled,updated_at) VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(slot) DO UPDATE SET name=excluded.name,base_url=excluded.base_url,model=excluded.model,api_key=CASE WHEN length(excluded.api_key)=0 THEN ai_nodes.api_key ELSE excluded.api_key END,timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,updated_at=excluded.updated_at`, n.Slot, n.Name, n.BaseURL, n.Model, encrypted, n.TimeoutMS, en, now)
+	return err
+}
+
+type ReviewJob struct {
+	ID          int64  `json:"id"`
+	JobKey      string `json:"job_key"`
+	SHA256      string `json:"sha256"`
+	FieldName   string `json:"field_name"`
+	Model       string `json:"model"`
+	Sampled     bool   `json:"sampled"`
+	Status      string `json:"status"`
+	Promotion   string `json:"promotion"`
+	CreatedAt   string `json:"created_at"`
+	CompletedAt string `json:"completed_at"`
+}
+
+type ReviewVote struct {
+	ID         int64   `json:"id"`
+	JobID      int64   `json:"job_id"`
+	NodeSlot   string  `json:"node_slot"`
+	Result     string  `json:"result"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
+	Category   string  `json:"category"`
+	LatencyMS  int64   `json:"latency_ms"`
+	Error      string  `json:"error,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+}
+
+type RulePromotion struct {
+	ID          int64  `json:"id"`
+	JobID       int64  `json:"job_id"`
+	SHA256      string `json:"sha256"`
+	Kind        string `json:"kind"`
+	VoteSummary string `json:"vote_summary"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model string, sampled bool) (ReviewJob, bool, error) {
+	if err := validateHash(sha256Value); err != nil {
+		return ReviewJob{}, false, err
+	}
+	jobKey = strings.TrimSpace(jobKey)
+	if jobKey == "" || len(jobKey) > 256 {
+		return ReviewJob{}, false, errors.New("review job key is invalid")
+	}
+	sampledInt := 0
+	if sampled {
+		sampledInt = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,created_at) VALUES(?,?,?,?,?,'queued',?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, now)
+	if err != nil {
+		return ReviewJob{}, false, err
+	}
+	created := false
+	if n, _ := res.RowsAffected(); n > 0 {
+		created = true
+	}
+	var j ReviewJob
+	var sampledDB int
+	err = s.db.QueryRowContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,created_at,completed_at FROM review_jobs WHERE job_key=?", jobKey).Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampledDB, &j.Status, &j.Promotion, &j.CreatedAt, &j.CompletedAt)
+	j.Sampled = sampledDB != 0
+	return j, created, err
+}
+
+func (s *Store) RecordReviewVote(ctx context.Context, v ReviewVote) error {
+	if v.JobID < 1 || v.NodeSlot == "" {
+		return errors.New("invalid review vote")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO review_votes(job_id,node_slot,result,confidence,reason,category,latency_ms,error,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,node_slot) DO UPDATE SET result=excluded.result,confidence=excluded.confidence,reason=excluded.reason,category=excluded.category,latency_ms=excluded.latency_ms,error=excluded.error,created_at=excluded.created_at`, v.JobID, v.NodeSlot, v.Result, v.Confidence, v.Reason, v.Category, v.LatencyMS, v.Error, now)
+	return err
+}
+
+func (s *Store) CompleteReviewJob(ctx context.Context, id int64, status, promotion string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status=?,promotion=?,completed_at=? WHERE id=?", status, promotion, time.Now().UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
+func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind, summary string) error {
+	if kind != "trusted" && kind != "risk" {
+		return errors.New("invalid promotion kind")
+	}
+	if err := validateHash(sha256Value); err != nil {
+		return err
+	}
+	if _, err := s.AddHashSource(ctx, kind, sha256Value, "automatic async quorum", "async_quorum"); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO rule_promotions(job_id,sha256,kind,vote_summary,created_at) VALUES(?,?,?,?,?)", jobID, strings.ToLower(sha256Value), kind, summary, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) ListReviewJobs(ctx context.Context, limit int) ([]ReviewJob, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,created_at,completed_at FROM review_jobs ORDER BY id DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReviewJob
+	for rows.Next() {
+		var j ReviewJob
+		var sampled int
+		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.CreatedAt, &j.CompletedAt); err != nil {
+			return nil, err
+		}
+		j.Sampled = sampled != 0
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListReviewVotes(ctx context.Context, jobID int64) ([]ReviewVote, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_id,node_slot,result,confidence,reason,category,latency_ms,error,created_at FROM review_votes WHERE job_id=? ORDER BY node_slot", jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReviewVote
+	for rows.Next() {
+		var v ReviewVote
+		if err := rows.Scan(&v.ID, &v.JobID, &v.NodeSlot, &v.Result, &v.Confidence, &v.Reason, &v.Category, &v.LatencyMS, &v.Error, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func ValidateAIEndpoint(e AIEndpoint) error {
 	if len(e.BaseURL) > 2048 {
 		return errors.New("AI endpoint URL is too long")
@@ -958,5 +1196,15 @@ func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 		}
 		out[k] = n
 	}
+	var asyncConfigured int64
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM ai_nodes WHERE enabled=1 AND slot IN ('async_1','async_2','async_3')").Scan(&asyncConfigured); err != nil {
+		return nil, err
+	}
+	out["async_nodes_configured"] = asyncConfigured
+	var promotions int64
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM rule_promotions").Scan(&promotions); err != nil {
+		return nil, err
+	}
+	out["async_promotions"] = promotions
 	return out, nil
 }

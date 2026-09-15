@@ -16,7 +16,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { api, ApiError } from '@/api/client'
-import type { AIEndpoint, GuardConfig } from '@/types'
+import type { AIEndpoint, AINode, GuardConfig } from '@/types'
 import { useToast } from '@/composables/toast'
 
 const defaultConfig: GuardConfig = {
@@ -37,20 +37,35 @@ const defaultEndpoint: AIEndpoint = {
   timeout_ms: 15000,
   max_concurrency: 16,
 }
+const defaultAsyncNodes: AINode[] = (['async_1', 'async_2', 'async_3'] as const).map((slot, index) => ({
+  slot,
+  name: `异步节点 ${index + 1}`,
+  base_url: '',
+  model: '',
+  api_key: '',
+  has_api_key: false,
+  timeout_ms: 15000,
+  enabled: true,
+}))
 
 const config = ref<GuardConfig>(cloneConfig(defaultConfig))
 const endpoint = ref<AIEndpoint>({ ...defaultEndpoint })
 const savedConfig = ref<GuardConfig>(cloneConfig(defaultConfig))
 const savedEndpoint = ref<AIEndpoint>({ ...defaultEndpoint })
+const asyncNodes = ref<AINode[]>(cloneNodes(defaultAsyncNodes))
+const savedAsyncNodes = ref<AINode[]>(cloneNodes(defaultAsyncNodes))
 const configSnapshot = ref('')
 const endpointSnapshot = ref('')
+const asyncNodesSnapshot = ref('')
 const loading = ref(true)
 const savingConfig = ref(false)
 const savingEndpoint = ref(false)
+const savingAsyncNodes = ref(false)
 const testing = ref(false)
 const showKey = ref(false)
 const error = ref('')
 const testResult = ref<{ ok: boolean; message: string; latency?: number } | null>(null)
+const asyncTestResult = ref<Record<string, { ok: boolean; message: string; latency?: number }>>({})
 const toast = useToast()
 
 const configDirty = computed(() => configSnapshot.value !== serializeConfig(config.value))
@@ -63,7 +78,15 @@ const bodyLimitMB = computed({
 })
 
 function cloneConfig(value: GuardConfig): GuardConfig {
-  return { ...value, protected_paths: [...value.protected_paths], ai_endpoint: undefined }
+  return { ...value, protected_paths: [...value.protected_paths], ai_endpoint: undefined, async_nodes: undefined }
+}
+
+function cloneNodes(value: AINode[]): AINode[] {
+  return value.map((node) => ({ ...node, api_key: node.api_key || '' }))
+}
+
+function serializeNodes(value: AINode[]) {
+  return JSON.stringify(value.map((node) => ({ ...node, api_key: node.api_key ? '__changed__' : '' })))
 }
 
 function serializeConfig(value: GuardConfig) {
@@ -94,6 +117,14 @@ function applyEndpoint(value?: AIEndpoint) {
   showKey.value = false
 }
 
+function applyAsyncNodes(value?: AINode[]) {
+  const bySlot = new Map((value || []).map((node) => [node.slot, node]))
+  const normalized = cloneNodes(defaultAsyncNodes).map((fallback) => ({ ...fallback, ...(bySlot.get(fallback.slot) || {}), api_key: '' }))
+  asyncNodes.value = cloneNodes(normalized)
+  savedAsyncNodes.value = cloneNodes(normalized)
+  asyncNodesSnapshot.value = serializeNodes(normalized)
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -102,10 +133,40 @@ async function load() {
     const loaded = await api.getConfig()
     applyConfig(loaded)
     applyEndpoint(loaded.ai_endpoint)
+    applyAsyncNodes(loaded.async_nodes)
   } catch (requestError) {
     error.value = requestError instanceof ApiError ? requestError.message : '无法加载系统配置'
   } finally {
     loading.value = false
+  }
+}
+
+const asyncNodesDirty = computed(() => asyncNodesSnapshot.value !== serializeNodes(asyncNodes.value))
+
+async function saveAsyncNodes() {
+  if (asyncNodes.value.some((node) => !node.base_url.trim() || !node.model.trim())) {
+    toast.show('请补全三个异步节点配置', { tone: 'error' })
+    return
+  }
+  savingAsyncNodes.value = true
+  try {
+    const saved = await api.updateAINodes(cloneNodes(asyncNodes.value))
+    applyAsyncNodes(saved.items)
+    toast.show('异步投票节点已保存')
+  } catch (requestError) {
+    toast.show('异步节点保存失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    savingAsyncNodes.value = false
+  }
+}
+
+async function testAsyncNode(node: AINode) {
+  asyncTestResult.value[node.slot] = { ok: false, message: '测试中…' }
+  try {
+    const result = await api.testAINode(node.slot)
+    asyncTestResult.value[node.slot] = { ok: result.ok, message: result.message || (result.ok ? '节点响应正常' : '节点测试未通过'), latency: result.latency_ms }
+  } catch (requestError) {
+    asyncTestResult.value[node.slot] = { ok: false, message: requestError instanceof ApiError ? requestError.message : '节点连接失败' }
   }
 }
 
@@ -179,6 +240,11 @@ function resetEndpoint() {
   showKey.value = false
 }
 
+function resetAsyncNodes() {
+  asyncNodes.value = cloneNodes(savedAsyncNodes.value)
+  asyncTestResult.value = {}
+}
+
 onMounted(load)
 </script>
 
@@ -247,7 +313,7 @@ onMounted(load)
           <div class="field-label span-2">
             <span>受保护路径</span>
             <div v-for="protectedPath in config.protected_paths" :key="protectedPath" class="protected-path">
-              <code>{{ protectedPath }}</code><span>v0.1</span>
+              <code>{{ protectedPath }}</code><span>v0.2</span>
             </div>
             <span class="field-help">其他路径保持透明转发。</span>
           </div>
@@ -314,6 +380,35 @@ onMounted(load)
             <button type="button" class="primary-button" :disabled="!endpointDirty || savingEndpoint" :aria-busy="savingEndpoint" @click="saveEndpoint">
               <LoaderCircle v-if="savingEndpoint" class="spin" :size="16" /><Save v-else :size="16" />{{ savingEndpoint ? '保存中…' : '保存 AI 节点' }}
             </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section ai-settings-section async-ai-section">
+        <div class="settings-section-title">
+          <div class="section-icon purple"><Zap :size="19" /></div>
+          <div><h2>异步 AI 投票</h2><p>三个独立节点在请求完成后并行复核</p></div>
+          <span class="readonly-value">风险 2/3 · 可信 3/3</span>
+        </div>
+        <div v-for="node in asyncNodes" :key="node.slot" class="async-node-card">
+          <div class="async-node-heading"><strong>{{ node.slot }}</strong><span>{{ node.has_api_key ? '密钥已配置' : '未配置密钥' }}</span><button type="button" class="secondary-button" :disabled="!node.base_url || !node.model" @click="testAsyncNode(node)"><TestTube2 :size="15" />测试</button></div>
+          <div class="settings-form-grid">
+            <label class="field-label">名称<input v-model="node.name" /></label>
+            <label class="field-label">Base URL<input v-model="node.base_url" type="url" placeholder="https://api.example.com/v1" /></label>
+            <label class="field-label">模型<input v-model="node.model" placeholder="guard-reviewer" /></label>
+            <label class="field-label">API Key<div class="input-with-action"><input v-model="node.api_key" type="password" autocomplete="new-password" :placeholder="node.has_api_key ? '留空以保留现有密钥' : '输入节点密钥'" /></div></label>
+            <label class="field-label">超时（毫秒）<input v-model.number="node.timeout_ms" type="number" min="100" max="30000" step="100" /></label>
+            <label class="field-label checkbox-field"><input v-model="node.enabled" type="checkbox" />启用该节点</label>
+          </div>
+          <div v-if="asyncTestResult[node.slot]" class="test-result" :class="{ success: asyncTestResult[node.slot]?.ok, failed: !asyncTestResult[node.slot]?.ok }" role="status">
+            <Check v-if="asyncTestResult[node.slot]?.ok" :size="17" /><AlertTriangle v-else :size="17" /><span>{{ asyncTestResult[node.slot]?.message }}</span><strong v-if="asyncTestResult[node.slot]?.latency != null">{{ asyncTestResult[node.slot]?.latency }} ms</strong>
+          </div>
+        </div>
+        <div class="settings-section-footer" aria-live="polite">
+          <span>{{ asyncNodesDirty ? '异步投票节点有未保存的更改' : '异步投票节点配置已同步' }}</span>
+          <div>
+            <button type="button" class="secondary-button" :disabled="!asyncNodesDirty || savingAsyncNodes" @click="resetAsyncNodes"><RefreshCw :size="15" />重置</button>
+            <button type="button" class="primary-button" :disabled="!asyncNodesDirty || savingAsyncNodes" :aria-busy="savingAsyncNodes" @click="saveAsyncNodes"><LoaderCircle v-if="savingAsyncNodes" class="spin" :size="16" /><Save v-else :size="16" />{{ savingAsyncNodes ? '保存中…' : '保存三个节点' }}</button>
           </div>
         </div>
       </section>

@@ -249,19 +249,23 @@ func DeriveEventContract(reason Reason, blocked bool) (EventAction, EventOutcome
 }
 
 type Result struct {
-	Allow        bool
-	Blocked      bool
-	Reason       Reason
-	ProfileKey   string
-	Field        string
-	Hash         string
-	PromptBytes  int
-	PromptRunes  int
-	AISampled    bool
-	Model        string
-	AIVerdict    *AIVerdict
-	AuditLatency time.Duration
-	AILatency    time.Duration
+	Allow       bool
+	Blocked     bool
+	Reason      Reason
+	ProfileKey  string
+	Field       string
+	Hash        string
+	PromptBytes int
+	PromptRunes int
+	AISampled   bool
+	// ReviewContent is the bounded sample used by the asynchronous quorum.
+	// It is never persisted in ordinary events and is consumed only by the
+	// in-process queue after the synchronous decision has completed.
+	ReviewContent string
+	Model         string
+	AIVerdict     *AIVerdict
+	AuditLatency  time.Duration
+	AILatency     time.Duration
 }
 
 func (r Result) IsFailOpen() bool {

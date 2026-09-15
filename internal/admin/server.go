@@ -129,6 +129,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.putAI(w, r)
 	case path == "/ai-endpoint/test" && r.Method == http.MethodPost:
 		s.testAI(w, r)
+	case path == "/ai-nodes" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+		s.asyncNodes(w, r)
+	case strings.HasPrefix(path, "/ai-nodes/") && strings.HasSuffix(path, "/test") && r.Method == http.MethodPost:
+		s.testAsyncNode(w, r, path)
+	case path == "/review-jobs" && r.Method == http.MethodGet:
+		s.reviewJobs(w, r)
+	case strings.HasPrefix(path, "/review-jobs/") && strings.HasSuffix(path, "/votes") && r.Method == http.MethodGet:
+		s.reviewVotes(w, r, path)
 	case path == "/trusted-hashes" || path == "/risk-hashes":
 		s.hashCollection(w, r, path)
 	case strings.HasPrefix(path, "/trusted-hashes/") || strings.HasPrefix(path, "/risk-hashes/"):
@@ -180,7 +188,153 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	endpoint, _ := s.Store.GetAIEndpoint(r.Context())
 	endpoint.APIKey = ""
-	writeJSON(w, 200, mergeConfig(cfg, endpoint))
+	out := mergeConfig(cfg, endpoint)
+	nodes, err := s.Store.ListAINodes(r.Context())
+	if err != nil {
+		writeError(w, 500, "storage_error", "读取异步节点失败")
+		return
+	}
+	for i := range nodes {
+		nodes[i].APIKey = ""
+	}
+	out["async_nodes"] = nodes
+	out["async_quorum"] = map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}
+	writeJSON(w, 200, out)
+}
+
+const auditQuorumConfidence = 0.95
+
+func (s *Server) asyncNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		nodes, err := s.Store.ListAINodes(r.Context())
+		if err != nil {
+			writeError(w, 500, "storage_error", "读取异步节点失败")
+			return
+		}
+		for i := range nodes {
+			nodes[i].APIKey = ""
+		}
+		writeJSON(w, 200, map[string]any{"items": nodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}})
+		return
+	}
+	var input struct {
+		Nodes []asyncNodeInput `json:"nodes"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if len(input.Nodes) != 3 {
+		writeError(w, 400, "invalid_ai_nodes", "必须配置三个异步节点")
+		return
+	}
+	seen := map[string]bool{}
+	converted := make([]storage.AINode, 0, len(input.Nodes))
+	for _, raw := range input.Nodes {
+		node := raw.AINode()
+		if seen[node.Slot] {
+			writeError(w, 400, "invalid_ai_nodes", "异步节点 slot 不能重复")
+			return
+		}
+		seen[node.Slot] = true
+		if err := s.validateNode(node); err != nil {
+			writeError(w, 400, "invalid_ai_node", err.Error())
+			return
+		}
+		converted = append(converted, node)
+	}
+	for _, node := range converted {
+		if err := s.Store.SaveAINode(r.Context(), node); err != nil {
+			writeError(w, 500, "storage_error", "保存异步节点失败")
+			return
+		}
+	}
+	if !s.reloadRuntime(w, r) {
+		return
+	}
+	savedNodes, err := s.Store.ListAINodes(r.Context())
+	if err != nil {
+		writeError(w, 500, "storage_error", "读取已保存异步节点失败")
+		return
+	}
+	for i := range savedNodes {
+		savedNodes[i].APIKey = ""
+	}
+	writeJSON(w, 200, map[string]any{"items": savedNodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}})
+}
+
+type asyncNodeInput struct {
+	Slot      string `json:"slot"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKey    string `json:"api_key"`
+	TimeoutMS int64  `json:"timeout_ms"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func (n asyncNodeInput) AINode() storage.AINode {
+	return storage.AINode{Slot: n.Slot, Name: n.Name, BaseURL: n.BaseURL, Model: n.Model, APIKey: n.APIKey, TimeoutMS: n.TimeoutMS, Enabled: n.Enabled}
+}
+
+func (s *Server) validateNode(node storage.AINode) error {
+	u, err := s.validateAIEndpoint(strings.TrimSpace(node.BaseURL))
+	if err != nil {
+		return errors.New("审核节点地址无效")
+	}
+	node.BaseURL = u.String()
+	return storage.ValidateAINode(node)
+}
+
+func (s *Server) testAsyncNode(w http.ResponseWriter, r *http.Request, path string) {
+	slot := strings.TrimSuffix(strings.TrimPrefix(path, "/ai-nodes/"), "/test")
+	nodes, err := s.Store.ListAINodes(r.Context())
+	if err != nil {
+		writeError(w, 500, "storage_error", "读取异步节点失败")
+		return
+	}
+	for _, node := range nodes {
+		if node.Slot != slot {
+			continue
+		}
+		if s.TestAI == nil {
+			writeError(w, 503, "ai_unavailable", "审核节点测试未配置")
+			return
+		}
+		endpoint := storage.AIEndpoint{BaseURL: node.BaseURL, Model: node.Model, APIKey: node.APIKey, TimeoutMS: node.TimeoutMS, MaxConcurrency: 1}
+		latency, testErr := s.TestAI(r, endpoint)
+		if testErr != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "message": "节点测试失败"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": latency.Milliseconds(), "message": "节点响应正常"})
+		return
+	}
+	writeError(w, 404, "ai_node_not_found", "异步节点不存在")
+}
+
+func (s *Server) reviewJobs(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.Store.ListReviewJobs(r.Context(), limit)
+	if err != nil {
+		writeError(w, 500, "storage_error", "读取投票任务失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+func (s *Server) reviewVotes(w http.ResponseWriter, r *http.Request, path string) {
+	base := strings.TrimSuffix(path, "/votes")
+	id, ok := lastID(base)
+	if !ok {
+		writeError(w, 400, "invalid_id", "任务 ID 无效")
+		return
+	}
+	items, err := s.Store.ListReviewVotes(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "storage_error", "读取投票结果失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"items": items})
 }
 func mergeConfig(c storage.Config, e storage.AIEndpoint) map[string]any {
 	b, _ := json.Marshal(c)

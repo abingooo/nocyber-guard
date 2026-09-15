@@ -392,6 +392,46 @@ func TestAIEndpointAllowsInitialEmptyKeyAndPreservesConfiguredKey(t *testing.T) 
 	}
 }
 
+func TestAsyncNodesJobsVotesAndPromotion(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	node := AINode{Slot: "async_1", Name: "node one", BaseURL: "https://reviewer.example/v1", Model: "guard", APIKey: "secret", TimeoutMS: 15000, Enabled: true}
+	if err := store.SaveAINode(ctx, node); err != nil {
+		t.Fatalf("SaveAINode: %v", err)
+	}
+	nodes, err := store.ListAINodes(ctx)
+	if err != nil || len(nodes) != 1 || nodes[0].APIKey != "secret" || !nodes[0].HasAPIKey {
+		t.Fatalf("ListAINodes=%+v err=%v", nodes, err)
+	}
+	hash := strings.Repeat("b", 64)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", false)
+	if err != nil || !created || job.ID == 0 {
+		t.Fatalf("CreateReviewJob=%+v created=%v err=%v", job, created, err)
+	}
+	jobAgain, createdAgain, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", false)
+	if err != nil || createdAgain || jobAgain.ID != job.ID {
+		t.Fatalf("duplicate job=%+v created=%v err=%v", jobAgain, createdAgain, err)
+	}
+	if err := store.RecordReviewVote(ctx, ReviewVote{JobID: job.ID, NodeSlot: "async_1", Result: "reject", Confidence: .99, Reason: "risk", Category: "risk"}); err != nil {
+		t.Fatalf("RecordReviewVote: %v", err)
+	}
+	if err := store.PromoteHash(ctx, job.ID, hash, "risk", "async_1:reject:.990"); err != nil {
+		t.Fatalf("PromoteHash: %v", err)
+	}
+	match, found, err := store.LookupHash(ctx, hash)
+	if err != nil || !found || match.Kind != "risk" {
+		t.Fatalf("LookupHash=%+v found=%v err=%v", match, found, err)
+	}
+	jobs, err := store.ListReviewJobs(ctx, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("ListReviewJobs=%+v err=%v", jobs, err)
+	}
+	votes, err := store.ListReviewVotes(ctx, job.ID)
+	if err != nil || len(votes) != 1 {
+		t.Fatalf("ListReviewVotes=%+v err=%v", votes, err)
+	}
+}
+
 func TestBlockedEvidenceIsPlaintextOnlyInEvidenceRow(t *testing.T) {
 	ctx := context.Background()
 	store, _, _ := openTestStore(t)
