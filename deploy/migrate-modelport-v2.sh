@@ -330,7 +330,7 @@ SQL
         fi
 
         async_nodes_file=$work_dir/async_nodes.json
-        jq -s '[.[] | select(.kind == "ai_async_node") | {slot,name,base_url,model,api_key:"",timeout_ms,enabled:true}]' "$input" >"$async_nodes_file"
+        jq '[.[] | select(.kind == "ai_async_node") | {slot,name,base_url,model,api_key:"",timeout_ms,enabled:true}]' "$input" >"$async_nodes_file"
         async_current=$(jq -Sc '[.async_nodes[] | {slot,name,base_url,model,timeout_ms,enabled}] | sort_by(.slot)' "$config_file")
         async_desired=$(jq -Sc 'sort_by(.slot)' "$async_nodes_file")
         async_updated=0

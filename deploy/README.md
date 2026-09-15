@@ -94,8 +94,9 @@ the exported file. Scoped trusted rules are counted and skipped because an
 upstream-agnostic Guard cannot preserve a Sub2API group ID before upstream
 authentication; historical scoped rows do not abort the export. The file
 contains global active trusted hashes, all active risk hashes, the three
-enabled Codex profiles, and one synchronous AI-node configuration without its
-key. Evidence, credentials, users, events, and foreign IDs are never exported.
+enabled Codex profiles, one synchronous AI-node configuration, and the three
+asynchronous quorum-node configurations without keys. Evidence, credentials,
+users, events, and foreign IDs are never exported.
 
 Log into the local admin UI first. To create a curl cookie jar without putting
 the password in shell history, read it silently and send it over stdin:
@@ -112,8 +113,9 @@ unset NCG_LOGIN_PASSWORD
 
 Run an idempotent dry-run against the current Guard state first by appending
 `--dry-run` to the following command. The real import creates missing hashes,
-creates or updates the three named profiles, and applies the AI-node metadata
-while preserving any key already entered in Guard:
+creates or updates the three named profiles, and applies the synchronous and
+asynchronous AI-node metadata while preserving any keys already entered in
+Guard. Enter all four AI credentials separately before enabling review:
 
 ```sh
 NCG_ADMIN_COOKIE_FILE=/data/nocyber-guard/admin.cookies \
