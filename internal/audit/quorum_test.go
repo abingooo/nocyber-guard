@@ -38,7 +38,7 @@ func TestReviewAsyncFansOutAndQuorumPromotion(t *testing.T) {
 	}
 }
 
-func TestQuorumPromotionRequiresAllPassAndIgnoresFailures(t *testing.T) {
+func TestQuorumPromotionAllowsTwoMatchingVotesAndIgnoresFailures(t *testing.T) {
 	votes := []AsyncVote{
 		{Slot: "async_1", Verdict: AIVerdict{Result: VerdictPass, Confidence: .99}},
 		{Slot: "async_2", Verdict: AIVerdict{Result: VerdictPass, Confidence: .99}},
@@ -55,6 +55,29 @@ func TestQuorumPromotionRequiresAllPassAndIgnoresFailures(t *testing.T) {
 	if kind, ok := QuorumPromotion(votes, 3, .95); !ok || kind != "risk" {
 		t.Fatalf("promotion=%q ok=%v", kind, ok)
 	}
+}
+
+func TestReviewAsyncQuorumDoesNotPromoteConflictingValidVotes(t *testing.T) {
+	nodes := []AsyncNodeReviewer{
+		{Slot: "async_1", Reviewer: delayedVerdictReviewer(0, VerdictPass)},
+		{Slot: "async_2", Reviewer: delayedVerdictReviewer(20*time.Millisecond, VerdictReject)},
+		{Slot: "async_3", Reviewer: delayedVerdictReviewer(40*time.Millisecond, VerdictPass)},
+	}
+	result := ReviewAsyncQuorum(context.Background(), nodes, AIReviewRequest{Field: "instructions", Content: "x"}, .95)
+	if !result.Reached || !result.Conflict || result.Kind != "" {
+		t.Fatalf("conflicting result promoted: %+v", result)
+	}
+}
+
+func delayedVerdictReviewer(delay time.Duration, result Verdict) Reviewer {
+	return ReviewerFunc(func(ctx context.Context, _ AIReviewRequest) (AIVerdict, error) {
+		select {
+		case <-time.After(delay):
+			return AIVerdict{Result: result, Confidence: .99, Reason: "test", Category: "test"}, nil
+		case <-ctx.Done():
+			return AIVerdict{}, ctx.Err()
+		}
+	})
 }
 
 func TestReviewAsyncQuorumCancelsSlowThirdNode(t *testing.T) {
