@@ -37,13 +37,23 @@ async function submit() {
     <div class="login-grid-art" aria-hidden="true"><span /><span /><span /><span /><span /></div>
     <section class="login-brand-panel">
       <div class="brand-lockup large"><div class="brand-mark"><ShieldCheck :size="25" /></div><div class="brand-copy"><strong>NoCyber</strong><span>GUARD / CONTROL</span></div></div>
-      <div class="login-intro"><p class="eyebrow">SECURITY OPERATIONS</p><h1>让每一次请求<br /><em>先过安全门。</em></h1><p>集中管理提示词审核、风险规则与运行状态。</p></div>
+      <div class="login-intro">
+        <p class="eyebrow">SECURITY OPERATIONS</p>
+        <h1>让每一次请求<br /><em>先过安全门。</em></h1>
+        <p>集中管理提示词审核、风险规则与运行状态，让安全策略清晰、可靠、可追溯。</p>
+        <div class="login-capabilities" aria-label="核心能力">
+          <div><span>01</span><strong>实时预检</strong><small>请求进入上游前完成策略判断</small></div>
+          <div><span>02</span><strong>智能复核</strong><small>多节点并行投票，持续沉淀规则</small></div>
+          <div><span>03</span><strong>完整追踪</strong><small>决策、延迟与证据统一留痕</small></div>
+        </div>
+      </div>
       <div class="login-footnote"><span class="status-dot" /> Guard 服务已准备就绪</div>
     </section>
     <section class="login-form-panel">
       <div class="login-form-card">
         <div class="mobile-login-logo"><div class="brand-mark"><ShieldCheck :size="21" /></div><strong>NoCyber Guard</strong></div>
-        <p class="eyebrow">ADMIN CONSOLE</p><h2>欢迎回来</h2><p class="muted">登录管理后台以继续操作</p>
+        <div class="login-card-heading"><p class="eyebrow">ADMIN CONSOLE</p><span class="login-version">SECURE ACCESS</span></div>
+        <h2>欢迎回来</h2><p class="muted">登录 NoCyber Guard 管理控制台</p>
         <form @submit.prevent="submit">
           <label class="field-label" for="username">管理员账号</label>
           <div class="input-with-icon"><UserRound :size="17" /><input id="username" v-model="username" autocomplete="username" placeholder="输入账号" /></div>

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.1 - 2026-09-17
+
+- Rebuilt the login screen as a responsive NoCyber security-console experience.
+- Added a consistent visual system for navigation, status, metrics, charts, forms, tables, drawers, and notifications.
+- Restored the missing login, overview, and toast styles that previously caused browser-default rendering.
+- Improved desktop, tablet, and mobile layouts without changing proxy, audit, storage, or API behavior.
+
 ## v0.3.0 - 2026-09-17
 
 - Changed asynchronous quorum to symmetric `2/3` high-confidence pass or reject promotion.
