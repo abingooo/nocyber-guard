@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.2.0",
+  "product_version": "0.3.0",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -37,17 +37,19 @@
     {"name": "New API", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"},
     {"name": "CPA", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"}
   ],
-  "not_audited_in_v0_2": [
+  "not_audited_in_v0_3": [
     "/v1/chat/completions",
     "/v1/messages",
     "websocket_message_frames",
     "response_content"
   ],
-  "async_quorum_v0_2": {
+  "async_quorum_v0_3": {
     "configured_nodes": 3,
     "risk_promotion": "2/3 high-confidence reject",
-    "trusted_promotion": "3/3 high-confidence pass",
+    "trusted_promotion": "2/3 high-confidence pass",
     "confidence_threshold": 0.95,
-    "failure_policy": "failed, uncertain, low-confidence, and conflicting votes do not promote"
+    "failure_policy": "failed, uncertain, low-confidence, and conflicting valid votes do not promote",
+    "retries": {"max_attempts": 3, "backoff": "10s,20s; terminal after third attempt"},
+    "completion": "quorum is accepted as soon as two same-kind valid votes arrive"
   }
 }

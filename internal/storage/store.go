@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at D
 CREATE INDEX IF NOT EXISTS audit_events_reason_idx ON audit_events(reason);
 CREATE TABLE IF NOT EXISTS blocked_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL REFERENCES audit_events(id) ON DELETE CASCADE, field_name TEXT NOT NULL, content TEXT NOT NULL, partial INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS review_jobs_created_idx ON review_jobs(created_at DESC);
 CREATE TABLE IF NOT EXISTS review_votes(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, node_slot TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(job_id,node_slot));
 CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, kind TEXT NOT NULL, vote_summary TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_id,kind));
@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 	}
 	if err := ensureColumn(ctx, s.db, "ai_endpoints", "max_concurrency", "INTEGER NOT NULL DEFAULT 16"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"next_attempt_at", "TEXT NOT NULL DEFAULT ''"},
+		{"last_error", "TEXT NOT NULL DEFAULT ''"},
+		{"sample_ciphertext", "BLOB NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(ctx, s.db, "review_jobs", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []struct {
 		name       string
@@ -772,7 +783,7 @@ type AIEndpoint struct {
 }
 
 // AINode is a separately configurable reviewer. Slot "sync" is represented
-// by the legacy ai_endpoints row; async_1..async_3 are the v0.2 quorum nodes.
+// by the legacy ai_endpoints row; async_1..async_3 are the v0.3 quorum nodes.
 type AINode struct {
 	ID        int64  `json:"id"`
 	Slot      string `json:"slot"`
@@ -863,16 +874,19 @@ ON CONFLICT(slot) DO UPDATE SET name=excluded.name,base_url=excluded.base_url,mo
 }
 
 type ReviewJob struct {
-	ID          int64  `json:"id"`
-	JobKey      string `json:"job_key"`
-	SHA256      string `json:"sha256"`
-	FieldName   string `json:"field_name"`
-	Model       string `json:"model"`
-	Sampled     bool   `json:"sampled"`
-	Status      string `json:"status"`
-	Promotion   string `json:"promotion"`
-	CreatedAt   string `json:"created_at"`
-	CompletedAt string `json:"completed_at"`
+	ID            int64  `json:"id"`
+	JobKey        string `json:"job_key"`
+	SHA256        string `json:"sha256"`
+	FieldName     string `json:"field_name"`
+	Model         string `json:"model"`
+	Sampled       bool   `json:"sampled"`
+	Status        string `json:"status"`
+	Promotion     string `json:"promotion"`
+	Attempts      int    `json:"attempts"`
+	NextAttemptAt string `json:"next_attempt_at"`
+	LastError     string `json:"last_error,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	CompletedAt   string `json:"completed_at"`
 }
 
 type ReviewVote struct {
@@ -897,7 +911,7 @@ type RulePromotion struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model string, sampled bool) (ReviewJob, bool, error) {
+func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model, content string, sampled bool) (ReviewJob, bool, error) {
 	if err := validateHash(sha256Value); err != nil {
 		return ReviewJob{}, false, err
 	}
@@ -910,7 +924,15 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 		sampledInt = 1
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,created_at) VALUES(?,?,?,?,?,'queued',?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, now)
+	var encrypted []byte
+	var err error
+	if content != "" {
+		encrypted, err = s.encrypt([]byte(content))
+		if err != nil {
+			return ReviewJob{}, false, err
+		}
+	}
+	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,sample_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, encrypted, now, now)
 	if err != nil {
 		return ReviewJob{}, false, err
 	}
@@ -920,9 +942,89 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 	}
 	var j ReviewJob
 	var sampledDB int
-	err = s.db.QueryRowContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,created_at,completed_at FROM review_jobs WHERE job_key=?", jobKey).Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampledDB, &j.Status, &j.Promotion, &j.CreatedAt, &j.CompletedAt)
+	err = s.db.QueryRowContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE job_key=?", jobKey).Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampledDB, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt)
 	j.Sampled = sampledDB != 0
 	return j, created, err
+}
+
+func (s *Store) LoadReviewJobSample(ctx context.Context, id int64) (string, error) {
+	var encrypted []byte
+	if err := s.db.QueryRowContext(ctx, "SELECT sample_ciphertext FROM review_jobs WHERE id=?", id).Scan(&encrypted); err != nil {
+		return "", err
+	}
+	if len(encrypted) == 0 {
+		return "", nil
+	}
+	plain, err := s.decrypt(encrypted)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func (s *Store) MarkReviewJobRunning(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status='running',attempts=attempts+1,updated_at=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
+// ClaimReviewJob atomically claims a queued/retryable job. This prevents the
+// recovery ticker and a duplicate enqueue from running the same hash twice.
+func (s *Store) ClaimReviewJob(ctx context.Context, id int64) (bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status IN ('queued','retry_pending') AND (next_attempt_at='' OR next_attempt_at<=?) AND attempts<3", now, id, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+func (s *Store) ScheduleReviewRetry(ctx context.Context, id int64, errText string, delay time.Duration) error {
+	if delay < time.Second {
+		delay = time.Second
+	}
+	if len(errText) > 500 {
+		errText = errText[:500]
+	}
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status='retry_pending',next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", now.Add(delay).Format(time.RFC3339Nano), errText, now.Format(time.RFC3339Nano), id)
+	return err
+}
+
+func (s *Store) ListDueReviewJobs(ctx context.Context, limit int) ([]ReviewJob, error) {
+	if limit < 1 || limit > 100 {
+		limit = 25
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE status IN ('queued','retry_pending') AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY id LIMIT ?", now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReviewJob
+	for rows.Next() {
+		var j ReviewJob
+		var sampled int
+		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
+			return nil, err
+		}
+		j.Sampled = sampled != 0
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RequeueStaleReviewJobs(ctx context.Context, age time.Duration) error {
+	if age < time.Minute {
+		age = 2 * time.Minute
+	}
+	cutoff := time.Now().UTC().Add(-age).Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status='completed_no_quorum',last_error='worker_restarted_after_max_attempts',completed_at=?,updated_at=? WHERE status='running' AND attempts>=3 AND (updated_at='' OR updated_at<?)", now, now, cutoff); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "UPDATE review_jobs SET status='retry_pending',next_attempt_at='',last_error='worker_restarted',updated_at=? WHERE status='running' AND attempts<3 AND (updated_at='' OR updated_at<?)", now, cutoff)
+	return err
 }
 
 func (s *Store) RecordReviewVote(ctx context.Context, v ReviewVote) error {
@@ -946,18 +1048,30 @@ func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind,
 	if err := validateHash(sha256Value); err != nil {
 		return err
 	}
-	if _, err := s.AddHashSource(ctx, kind, sha256Value, "automatic async quorum", "async_quorum"); err != nil {
+	table := "trusted_hashes"
+	if kind == "risk" {
+		table = "risk_hashes"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO rule_promotions(job_id,sha256,kind,vote_summary,created_at) VALUES(?,?,?,?,?)", jobID, strings.ToLower(sha256Value), kind, summary, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = tx.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,source,created_at) VALUES(?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,source=excluded.source,enabled=1", strings.ToLower(sha256Value), "automatic async quorum", "async_quorum", now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO rule_promotions(job_id,sha256,kind,vote_summary,created_at) VALUES(?,?,?,?,?)", jobID, strings.ToLower(sha256Value), kind, summary, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListReviewJobs(ctx context.Context, limit int) ([]ReviewJob, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,created_at,completed_at FROM review_jobs ORDER BY id DESC LIMIT ?", limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs ORDER BY id DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -966,7 +1080,7 @@ func (s *Store) ListReviewJobs(ctx context.Context, limit int) ([]ReviewJob, err
 	for rows.Next() {
 		var j ReviewJob
 		var sampled int
-		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.CreatedAt, &j.CompletedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
 			return nil, err
 		}
 		j.Sampled = sampled != 0

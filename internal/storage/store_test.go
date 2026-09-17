@@ -404,11 +404,11 @@ func TestAsyncNodesJobsVotesAndPromotion(t *testing.T) {
 		t.Fatalf("ListAINodes=%+v err=%v", nodes, err)
 	}
 	hash := strings.Repeat("b", 64)
-	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", false)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", false)
 	if err != nil || !created || job.ID == 0 {
 		t.Fatalf("CreateReviewJob=%+v created=%v err=%v", job, created, err)
 	}
-	jobAgain, createdAgain, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", false)
+	jobAgain, createdAgain, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", false)
 	if err != nil || createdAgain || jobAgain.ID != job.ID {
 		t.Fatalf("duplicate job=%+v created=%v err=%v", jobAgain, createdAgain, err)
 	}

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.0 - 2026-09-17
+
+- Changed asynchronous quorum to symmetric `2/3` high-confidence pass or reject promotion.
+- Quorum decisions are made as soon as two same-kind valid votes arrive; outstanding calls are cancelled.
+- Added encrypted persistent review samples, atomic job claiming, retry backoff, stale-job recovery, and terminal task states.
+- Conflicting valid votes never promote a rule; failed, uncertain, low-confidence, and timed-out votes are non-votes.
+
 ## v0.2.0 - 2026-09-15
 
 - Added three independently configurable asynchronous OpenAI-compatible review nodes.

@@ -198,7 +198,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		nodes[i].APIKey = ""
 	}
 	out["async_nodes"] = nodes
-	out["async_quorum"] = map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}
+	out["async_quorum"] = map[string]any{"risk": "2/3 reject", "trusted": "2/3 pass", "confidence": auditQuorumConfidence}
 	writeJSON(w, 200, out)
 }
 
@@ -214,7 +214,7 @@ func (s *Server) asyncNodes(w http.ResponseWriter, r *http.Request) {
 		for i := range nodes {
 			nodes[i].APIKey = ""
 		}
-		writeJSON(w, 200, map[string]any{"items": nodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}})
+		writeJSON(w, 200, map[string]any{"items": nodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "2/3 pass", "confidence": auditQuorumConfidence}})
 		return
 	}
 	var input struct {
@@ -259,7 +259,7 @@ func (s *Server) asyncNodes(w http.ResponseWriter, r *http.Request) {
 	for i := range savedNodes {
 		savedNodes[i].APIKey = ""
 	}
-	writeJSON(w, 200, map[string]any{"items": savedNodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "3/3 pass", "confidence": auditQuorumConfidence}})
+	writeJSON(w, 200, map[string]any{"items": savedNodes, "quorum": map[string]any{"risk": "2/3 reject", "trusted": "2/3 pass", "confidence": auditQuorumConfidence}})
 }
 
 type asyncNodeInput struct {

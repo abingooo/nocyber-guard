@@ -107,15 +107,42 @@ func (ar *asyncRuntime) enqueue(job asyncReviewJob) bool {
 func (ar *asyncRuntime) start() {
 	go func() {
 		defer close(ar.done)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		ar.recoverDue()
 		for {
 			select {
 			case <-ar.stop:
 				return
 			case job := <-ar.queue:
 				ar.process(job)
+			case <-ticker.C:
+				ar.recoverDue()
 			}
 		}
 	}()
+}
+
+func (ar *asyncRuntime) recoverDue() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := ar.store.RequeueStaleReviewJobs(ctx, 2*time.Minute); err != nil {
+		ar.logger.Warn("async_review_requeue_failed", "error", err)
+	}
+	jobs, err := ar.store.ListDueReviewJobs(ctx, 25)
+	if err != nil {
+		ar.logger.Warn("async_review_recovery_failed", "error", err)
+		return
+	}
+	for _, record := range jobs {
+		sample, err := ar.store.LoadReviewJobSample(ctx, record.ID)
+		if err != nil || sample == "" {
+			continue
+		}
+		if !ar.enqueue(asyncReviewJob{Hash: record.SHA256, Field: record.FieldName, Content: sample, Sampled: record.Sampled, Model: record.Model}) {
+			return
+		}
+	}
 }
 
 func (ar *asyncRuntime) close() {
@@ -130,12 +157,25 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Sampled)
-	if err != nil || !created {
+	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Content, job.Sampled)
+	if err != nil {
+		ar.logger.Warn("async_review_job_create_failed", "sha256", job.Hash, "error", err)
 		return
 	}
-	votes := audit.ReviewAsync(ctx, nodes, audit.AIReviewRequest{Field: job.Field, Content: job.Content, Sampled: job.Sampled, Model: job.Model, Criteria: audit.DefaultEngineConfig().ReviewCriteria})
-	for _, vote := range votes {
+	if !created {
+		if record.Status == "promoted" || record.Status == "completed_no_quorum" || record.Status == "failed" {
+			return
+		}
+		if sample, sampleErr := ar.store.LoadReviewJobSample(ctx, record.ID); sampleErr == nil && sample != "" {
+			job.Content = sample
+		}
+	}
+	claimed, err := ar.store.ClaimReviewJob(ctx, record.ID)
+	if err != nil || !claimed {
+		return
+	}
+	votes := audit.ReviewAsyncQuorum(ctx, nodes, audit.AIReviewRequest{Field: job.Field, Content: job.Content, Sampled: job.Sampled, Model: job.Model, Criteria: audit.DefaultEngineConfig().ReviewCriteria}, audit.DefaultRejectConfidence)
+	for _, vote := range votes.Votes {
 		row := storage.ReviewVote{JobID: record.ID, NodeSlot: vote.Slot, LatencyMS: vote.Latency.Milliseconds()}
 		if vote.Err != nil {
 			row.Error = vote.Err.Error()
@@ -149,9 +189,9 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 			ar.logger.Warn("async_vote_write_failed", "job_id", record.ID, "error", err)
 		}
 	}
-	kind, promoted := audit.QuorumPromotion(votes, len(nodes), audit.DefaultRejectConfidence)
+	kind, promoted := votes.Kind, votes.Reached && !votes.Conflict
 	if promoted {
-		summary := makeVoteSummary(votes)
+		summary := makeVoteSummary(votes.Votes)
 		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, summary); err != nil {
 			ar.logger.Warn("async_rule_promotion_failed", "job_id", record.ID, "error", err)
 			_ = ar.store.CompleteReviewJob(ctx, record.ID, "failed", "")
@@ -166,7 +206,12 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 			cancelReload()
 		}
 	} else {
-		_ = ar.store.CompleteReviewJob(ctx, record.ID, "completed", "")
+		if record.Attempts+1 < 3 {
+			delay := time.Duration(1<<record.Attempts) * 10 * time.Second
+			_ = ar.store.ScheduleReviewRetry(ctx, record.ID, "quorum_not_reached", delay)
+		} else {
+			_ = ar.store.CompleteReviewJob(ctx, record.ID, "completed_no_quorum", "")
+		}
 	}
 }
 

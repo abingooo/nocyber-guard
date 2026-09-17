@@ -313,7 +313,7 @@ onMounted(load)
           <div class="field-label span-2">
             <span>受保护路径</span>
             <div v-for="protectedPath in config.protected_paths" :key="protectedPath" class="protected-path">
-              <code>{{ protectedPath }}</code><span>v0.2</span>
+              <code>{{ protectedPath }}</code><span>v0.3</span>
             </div>
             <span class="field-help">其他路径保持透明转发。</span>
           </div>
@@ -388,7 +388,7 @@ onMounted(load)
         <div class="settings-section-title">
           <div class="section-icon purple"><Zap :size="19" /></div>
           <div><h2>异步 AI 投票</h2><p>三个独立节点在请求完成后并行复核</p></div>
-          <span class="readonly-value">风险 2/3 · 可信 3/3</span>
+          <span class="readonly-value">风险 2/3 · 可信 2/3</span>
         </div>
         <div v-for="node in asyncNodes" :key="node.slot" class="async-node-card">
           <div class="async-node-heading"><strong>{{ node.slot }}</strong><span>{{ node.has_api_key ? '密钥已配置' : '未配置密钥' }}</span><button type="button" class="secondary-button" :disabled="!node.base_url || !node.model" @click="testAsyncNode(node)"><TestTube2 :size="15" />测试</button></div>
