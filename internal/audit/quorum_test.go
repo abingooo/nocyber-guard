@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestReviewAsyncFansOutAndQuorumPromotion(t *testing.T) {
@@ -76,5 +77,37 @@ func TestReviewAsyncQuorumCancelsSlowThirdNode(t *testing.T) {
 	result := ReviewAsyncQuorum(context.Background(), nodes, AIReviewRequest{Field: "instructions", Content: "x"}, .95)
 	if !result.Reached || result.Kind != "trusted" || result.Conflict {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestReviewAsyncQuorumStartsAllNodesConcurrently(t *testing.T) {
+	started := make(chan string, 3)
+	release := make(chan struct{})
+	nodes := make([]AsyncNodeReviewer, 0, 3)
+	for i := 1; i <= 3; i++ {
+		slot := "async_" + string(rune('0'+i))
+		nodes = append(nodes, AsyncNodeReviewer{Slot: slot, Reviewer: ReviewerFunc(func(context.Context, AIReviewRequest) (AIVerdict, error) {
+			started <- slot
+			<-release
+			return AIVerdict{Result: VerdictPass, Confidence: .99, Reason: "ok", Category: "benign"}, nil
+		})})
+	}
+	resultCh := make(chan QuorumResult, 1)
+	go func() {
+		resultCh <- ReviewAsyncQuorum(context.Background(), nodes, AIReviewRequest{Field: "instructions", Content: "x"}, .95)
+	}()
+	seen := map[string]bool{}
+	for len(seen) < 3 {
+		select {
+		case slot := <-started:
+			seen[slot] = true
+		case <-time.After(time.Second):
+			t.Fatalf("only %d reviewers started before release", len(seen))
+		}
+	}
+	close(release)
+	result := <-resultCh
+	if !result.Reached || result.Kind != "trusted" || result.Conflict {
+		t.Fatalf("unexpected concurrent result: %+v", result)
 	}
 }

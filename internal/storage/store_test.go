@@ -432,6 +432,38 @@ func TestAsyncNodesJobsVotesAndPromotion(t *testing.T) {
 	}
 }
 
+func TestReviewJobClaimRetryAndStaleRecovery(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	hash := strings.Repeat("c", 64)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "encrypted sample", false)
+	if err != nil || !created {
+		t.Fatalf("CreateReviewJob = (%+v, %v, %v)", job, created, err)
+	}
+	claimed, err := store.ClaimReviewJob(ctx, job.ID)
+	if err != nil || !claimed {
+		t.Fatalf("first claim = (%v, %v)", claimed, err)
+	}
+	claimed, err = store.ClaimReviewJob(ctx, job.ID)
+	if err != nil || claimed {
+		t.Fatalf("duplicate claim = (%v, %v)", claimed, err)
+	}
+	old := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := store.db.ExecContext(ctx, "UPDATE review_jobs SET updated_at=? WHERE id=?", old, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueStaleReviewJobs(ctx, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	due, err := store.ListDueReviewJobs(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].ID != job.ID || due[0].Status != "retry_pending" || due[0].Attempts != 1 {
+		t.Fatalf("stale recovery = (%+v, %v)", due, err)
+	}
+	if sample, err := store.LoadReviewJobSample(ctx, job.ID); err != nil || sample != "encrypted sample" {
+		t.Fatalf("recovered sample = (%q, %v)", sample, err)
+	}
+}
+
 func TestBlockedEvidenceIsPlaintextOnlyInEvidenceRow(t *testing.T) {
 	ctx := context.Background()
 	store, _, _ := openTestStore(t)

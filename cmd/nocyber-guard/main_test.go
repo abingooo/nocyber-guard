@@ -1,11 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/abingooo/nocyber-guard/internal/audit"
+	"github.com/abingooo/nocyber-guard/internal/storage"
 )
 
 func TestClientIPRejectsSpoofedForwardedPrefix(t *testing.T) {
@@ -60,4 +67,88 @@ func TestAuditorAdapterDisabledDoesNotReadProtectedBody(t *testing.T) {
 	if adapter.ShouldAudit(req) {
 		t.Fatal("disabled audit runtime selected protected body")
 	}
+}
+
+func TestAsyncRuntimeRetriesAndRecoversPersistedJob(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hash := strings.Repeat("a", 64)
+	job := asyncReviewJob{Hash: hash, Field: "instructions", Content: "persisted review sample", Model: "test-model"}
+
+	firstStore, err := storage.Open(ctx, dataDir, masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRuntime := newAsyncRuntime(firstStore, logger)
+	failingNodes := make([]audit.AsyncNodeReviewer, 0, 3)
+	for i := 1; i <= 3; i++ {
+		failingNodes = append(failingNodes, audit.AsyncNodeReviewer{
+			Slot: "async_" + string(rune('0'+i)),
+			Reviewer: audit.ReviewerFunc(func(context.Context, audit.AIReviewRequest) (audit.AIVerdict, error) {
+				return audit.AIVerdict{}, errors.New("reviewer timeout")
+			}),
+		})
+	}
+	firstRuntime.setNodes(failingNodes)
+	firstRuntime.process(job)
+
+	jobs, err := firstStore.ListReviewJobs(ctx, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("jobs after failed attempt = (%+v, %v)", jobs, err)
+	}
+	if jobs[0].Status != "retry_pending" || jobs[0].Attempts != 1 {
+		t.Fatalf("failed attempt status = %+v, want retry_pending attempt 1", jobs[0])
+	}
+	if sample, err := firstStore.LoadReviewJobSample(ctx, jobs[0].ID); err != nil || sample != job.Content {
+		t.Fatalf("persisted sample = (%q, %v)", sample, err)
+	}
+	if err := firstStore.ScheduleReviewRetry(ctx, jobs[0].ID, "test_retry", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+
+	secondStore, err := storage.Open(ctx, dataDir, masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRuntime := newAsyncRuntime(secondStore, logger)
+	secondRuntime.setNodes([]audit.AsyncNodeReviewer{
+		{Slot: "async_1", Reviewer: fixedVerdictReviewer(audit.VerdictPass)},
+		{Slot: "async_2", Reviewer: fixedVerdictReviewer(audit.VerdictPass)},
+		{Slot: "async_3", Reviewer: audit.ReviewerFunc(func(context.Context, audit.AIReviewRequest) (audit.AIVerdict, error) {
+			return audit.AIVerdict{}, errors.New("third node unavailable")
+		})},
+	})
+	secondRuntime.start()
+	defer func() {
+		secondRuntime.close()
+		_ = secondStore.Close()
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err = secondStore.ListReviewJobs(ctx, 10)
+		if err == nil && len(jobs) == 1 && jobs[0].Status == "promoted" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(jobs) != 1 || jobs[0].Status != "promoted" || jobs[0].Promotion != "trusted" || jobs[0].Attempts != 2 {
+		t.Fatalf("recovered job = %+v, want trusted promotion on attempt 2", jobs)
+	}
+	match, found, err := secondStore.LookupHash(ctx, hash)
+	if err != nil || !found || match.Kind != "trusted" {
+		t.Fatalf("recovered promotion = (%+v, %v, %v)", match, found, err)
+	}
+}
+
+func fixedVerdictReviewer(result audit.Verdict) audit.Reviewer {
+	return audit.ReviewerFunc(func(context.Context, audit.AIReviewRequest) (audit.AIVerdict, error) {
+		return audit.AIVerdict{Result: result, Confidence: .99, Reason: "test", Category: "test"}, nil
+	})
 }
