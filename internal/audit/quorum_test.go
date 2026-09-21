@@ -10,21 +10,34 @@ import (
 
 func TestReviewAsyncFansOutAndQuorumPromotion(t *testing.T) {
 	var calls atomic.Int32
-	nodes := []AsyncNodeReviewer{
-		{Slot: "async_1", Reviewer: ReviewerFunc(func(context.Context, AIReviewRequest) (AIVerdict, error) {
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	reviewer := func(verdict AIVerdict) Reviewer {
+		return ReviewerFunc(func(context.Context, AIReviewRequest) (AIVerdict, error) {
 			calls.Add(1)
-			return AIVerdict{Result: VerdictReject, Confidence: .99, Reason: "unsafe", Category: "risk"}, nil
-		})},
-		{Slot: "async_2", Reviewer: ReviewerFunc(func(context.Context, AIReviewRequest) (AIVerdict, error) {
-			calls.Add(1)
-			return AIVerdict{Result: VerdictReject, Confidence: .98, Reason: "unsafe", Category: "risk"}, nil
-		})},
-		{Slot: "async_3", Reviewer: ReviewerFunc(func(context.Context, AIReviewRequest) (AIVerdict, error) {
-			calls.Add(1)
-			return AIVerdict{Result: VerdictPass, Confidence: .99, Reason: "benign", Category: "template"}, nil
-		})},
+			started <- struct{}{}
+			<-release
+			return verdict, nil
+		})
 	}
-	votes := ReviewAsync(context.Background(), nodes, AIReviewRequest{Field: "instructions", Content: "x"})
+	nodes := []AsyncNodeReviewer{
+		{Slot: "async_1", Reviewer: reviewer(AIVerdict{Result: VerdictReject, Confidence: .99, Reason: "unsafe", Category: "risk"})},
+		{Slot: "async_2", Reviewer: reviewer(AIVerdict{Result: VerdictReject, Confidence: .98, Reason: "unsafe", Category: "risk"})},
+		{Slot: "async_3", Reviewer: reviewer(AIVerdict{Result: VerdictPass, Confidence: .99, Reason: "benign", Category: "template"})},
+	}
+	votesCh := make(chan []AsyncVote, 1)
+	go func() {
+		votesCh <- ReviewAsync(context.Background(), nodes, AIReviewRequest{Field: "instructions", Content: "x"})
+	}()
+	for i := 0; i < 3; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("only %d reviewers started", calls.Load())
+		}
+	}
+	close(release)
+	votes := <-votesCh
 	if calls.Load() != 3 || len(votes) < 2 {
 		t.Fatalf("calls=%d votes=%d", calls.Load(), len(votes))
 	}
