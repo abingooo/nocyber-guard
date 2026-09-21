@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.2 - 2026-09-21
+
+- Fixed Guard configuration updates being rejected because response-only asynchronous quorum metadata was sent back to the strict update endpoint.
+- Added an explicit editable-field allowlist for configuration writes and regression coverage for all response-only metadata.
+
 ## v0.3.1 - 2026-09-17
 
 - Rebuilt the login screen as a responsive NoCyber security-console experience.

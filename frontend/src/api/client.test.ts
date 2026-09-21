@@ -68,7 +68,65 @@ describe('API client request policy', () => {
     expect(init.method).toBe('PUT')
     expect(headers.get('X-CSRF-Token')).toBe('csrf token')
     expect(headers.get('Content-Type')).toBe('application/json')
-    expect(JSON.parse(String(init.body))).toMatchObject({ expected_version: 7 })
+    expect(JSON.parse(String(init.body))).toEqual({
+      version: 7,
+      enabled: true,
+      mode: 'permissive',
+      upstream_url: 'https://upstream.example.com',
+      protected_paths: ['/v1/responses'],
+      request_timeout_ms: 1800,
+      max_body_bytes: 4 * 1024 * 1024,
+      event_retention_days: 30,
+      expected_version: 7,
+    })
+  })
+
+  it('does not send response-only config metadata back to the strict update endpoint', async () => {
+    document.cookie = 'ncg_csrf=csrf-token; Path=/'
+    const config: GuardConfig = {
+      version: 9,
+      enabled: true,
+      mode: 'permissive',
+      upstream_url: 'http://upstream:8080',
+      protected_paths: ['/v1/responses', '/responses'],
+      request_timeout_ms: 15000,
+      max_body_bytes: 19 * 1024 * 1024,
+      event_retention_days: 30,
+      ai_endpoint: {
+        base_url: 'https://ai.example.com/v1',
+        model: 'guard-model',
+        has_api_key: true,
+        timeout_ms: 15000,
+        max_concurrency: 16,
+      },
+      async_nodes: [],
+      async_quorum: {
+        confidence: 0.95,
+        risk: '2/3 reject',
+        trusted: '2/3 pass',
+      },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: config }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.updateConfig(config)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body))
+    expect(body).toEqual({
+      version: 9,
+      enabled: true,
+      mode: 'permissive',
+      upstream_url: 'http://upstream:8080',
+      protected_paths: ['/v1/responses', '/responses'],
+      request_timeout_ms: 15000,
+      max_body_bytes: 19 * 1024 * 1024,
+      event_retention_days: 30,
+      expected_version: 9,
+    })
+    expect(body).not.toHaveProperty('ai_endpoint')
+    expect(body).not.toHaveProperty('async_nodes')
+    expect(body).not.toHaveProperty('async_quorum')
   })
 
   it('updates a hash with its enabled state', async () => {

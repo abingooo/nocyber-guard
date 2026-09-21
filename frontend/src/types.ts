@@ -93,6 +93,11 @@ export interface GuardConfig {
   event_retention_days: number
   ai_endpoint?: AIEndpoint
   async_nodes?: AINode[]
+  async_quorum?: {
+    confidence: number
+    risk: string
+    trusted: string
+  }
 }
 
 export interface AIEndpoint {

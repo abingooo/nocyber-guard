@@ -90,6 +90,20 @@ function queryString(values: Record<string, string | number | undefined>) {
   return query ? `?${query}` : ''
 }
 
+function configUpdateBody(config: GuardConfig) {
+  return {
+    version: config.version,
+    enabled: config.enabled,
+    mode: config.mode,
+    upstream_url: config.upstream_url,
+    protected_paths: [...config.protected_paths],
+    request_timeout_ms: config.request_timeout_ms,
+    max_body_bytes: config.max_body_bytes,
+    event_retention_days: config.event_retention_days,
+    expected_version: config.version,
+  }
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<LoginResponse>('/auth/login', {
@@ -135,7 +149,7 @@ export const api = {
   updateConfig: (config: GuardConfig) =>
     request<GuardConfig>('/config', {
       method: 'PUT',
-      body: JSON.stringify({ ...config, expected_version: config.version }),
+      body: JSON.stringify(configUpdateBody(config)),
     }),
   updateAIEndpoint: (endpoint: AIEndpoint) =>
     request<AIEndpoint>('/ai-endpoint', { method: 'PUT', body: JSON.stringify(endpoint) }),
@@ -150,4 +164,4 @@ export const api = {
     request<{ ok: boolean; latency_ms?: number; message?: string }>(`/ai-nodes/${encodeURIComponent(slot)}/test`, { method: 'POST', body: '{}' }),
 }
 
-export const apiInternals = { unwrap, queryString, readCookie }
+export const apiInternals = { unwrap, queryString, readCookie, configUpdateBody }

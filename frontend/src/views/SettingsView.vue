@@ -78,7 +78,16 @@ const bodyLimitMB = computed({
 })
 
 function cloneConfig(value: GuardConfig): GuardConfig {
-  return { ...value, protected_paths: [...value.protected_paths], ai_endpoint: undefined, async_nodes: undefined }
+  return {
+    version: value.version,
+    enabled: value.enabled,
+    mode: value.mode,
+    upstream_url: value.upstream_url,
+    protected_paths: [...value.protected_paths],
+    request_timeout_ms: value.request_timeout_ms,
+    max_body_bytes: value.max_body_bytes,
+    event_retention_days: value.event_retention_days,
+  }
 }
 
 function cloneNodes(value: AINode[]): AINode[] {
