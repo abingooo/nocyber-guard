@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, apiInternals } from './client'
-import type { GuardConfig } from '@/types'
+import type { AIEndpoint, AINode, GuardConfig } from '@/types'
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -127,6 +127,76 @@ describe('API client request policy', () => {
     expect(body).not.toHaveProperty('ai_endpoint')
     expect(body).not.toHaveProperty('async_nodes')
     expect(body).not.toHaveProperty('async_quorum')
+  })
+
+  it('allowlists synchronous AI fields for save and connectivity test requests', async () => {
+    document.cookie = 'ncg_csrf=csrf-token; Path=/'
+    const endpoint: AIEndpoint = {
+      base_url: ' https://ai.example.com/v1 ',
+      model: ' guard-model ',
+      api_key: 'replacement-secret',
+      has_api_key: true,
+      timeout_ms: 15000,
+      max_concurrency: 16,
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: endpoint }))
+      .mockResolvedValueOnce(jsonResponse({ data: { ok: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.updateAIEndpoint(endpoint)
+    await api.testAIEndpoint(endpoint)
+
+    const expected = {
+      base_url: 'https://ai.example.com/v1',
+      model: 'guard-model',
+      api_key: 'replacement-secret',
+      timeout_ms: 15000,
+      max_concurrency: 16,
+    }
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual(expected)
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual(expected)
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).not.toHaveProperty('has_api_key')
+  })
+
+  it('allowlists asynchronous AI fields and tests the unsaved form values', async () => {
+    document.cookie = 'ncg_csrf=csrf-token; Path=/'
+    const nodes: AINode[] = (['async_1', 'async_2', 'async_3'] as const).map((slot, index) => ({
+      id: index + 11,
+      slot,
+      name: ` node ${index + 1} `,
+      base_url: ` https://node-${index + 1}.example.com/v1 `,
+      model: ` model-${index + 1} `,
+      api_key: `secret-${index + 1}`,
+      has_api_key: true,
+      timeout_ms: 15000,
+      enabled: true,
+    }))
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: { items: nodes } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { ok: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.updateAINodes(nodes)
+    await api.testAINode(nodes[0]!)
+
+    const updateBody = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(updateBody.nodes).toHaveLength(3)
+    expect(updateBody.nodes[0]).toEqual({
+      slot: 'async_1',
+      name: 'node 1',
+      base_url: 'https://node-1.example.com/v1',
+      model: 'model-1',
+      api_key: 'secret-1',
+      timeout_ms: 15000,
+      enabled: true,
+    })
+    expect(updateBody.nodes[0]).not.toHaveProperty('id')
+    expect(updateBody.nodes[0]).not.toHaveProperty('has_api_key')
+
+    const [testURL, testInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(testURL).toBe('/api/v1/ai-nodes/async_1/test')
+    expect(JSON.parse(String(testInit.body))).toEqual(updateBody.nodes[0])
   })
 
   it('updates a hash with its enabled state', async () => {

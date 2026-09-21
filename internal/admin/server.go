@@ -287,29 +287,67 @@ func (s *Server) validateNode(node storage.AINode) error {
 
 func (s *Server) testAsyncNode(w http.ResponseWriter, r *http.Request, path string) {
 	slot := strings.TrimSuffix(strings.TrimPrefix(path, "/ai-nodes/"), "/test")
+	if slot != "async_1" && slot != "async_2" && slot != "async_3" {
+		writeError(w, 404, "ai_node_not_found", "异步节点不存在")
+		return
+	}
+	var input asyncNodeInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
 	nodes, err := s.Store.ListAINodes(r.Context())
 	if err != nil {
 		writeError(w, 500, "storage_error", "读取异步节点失败")
 		return
 	}
+	var saved *storage.AINode
 	for _, node := range nodes {
-		if node.Slot != slot {
-			continue
+		if node.Slot == slot {
+			candidate := node
+			saved = &candidate
+			break
 		}
-		if s.TestAI == nil {
-			writeError(w, 503, "ai_unavailable", "审核节点测试未配置")
+	}
+	provided := input.Slot != "" || input.Name != "" || input.BaseURL != "" || input.Model != "" ||
+		input.APIKey != "" || input.TimeoutMS != 0
+	var node storage.AINode
+	if provided {
+		if input.Slot != "" && input.Slot != slot {
+			writeError(w, 400, "invalid_ai_node", "异步节点 slot 与请求路径不一致")
 			return
 		}
-		endpoint := storage.AIEndpoint{BaseURL: node.BaseURL, Model: node.Model, APIKey: node.APIKey, TimeoutMS: node.TimeoutMS, MaxConcurrency: 1}
-		latency, testErr := s.TestAI(r, endpoint)
-		if testErr != nil {
-			writeJSON(w, 200, map[string]any{"ok": false, "message": "节点测试失败"})
-			return
+		input.Slot = slot
+		node = input.AINode()
+		if node.APIKey == "" && saved != nil {
+			node.APIKey = saved.APIKey
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": latency.Milliseconds(), "message": "节点响应正常"})
+	} else if saved != nil {
+		node = *saved
+	} else {
+		writeError(w, 404, "ai_node_not_found", "异步节点不存在")
 		return
 	}
-	writeError(w, 404, "ai_node_not_found", "异步节点不存在")
+	u, err := s.validateAIEndpoint(strings.TrimSpace(node.BaseURL))
+	if err != nil {
+		writeError(w, 400, "invalid_ai_endpoint", "审核节点地址无效")
+		return
+	}
+	node.BaseURL = u.String()
+	if err := storage.ValidateAINode(node); err != nil {
+		writeError(w, 400, "invalid_ai_node", err.Error())
+		return
+	}
+	if s.TestAI == nil {
+		writeError(w, 503, "ai_unavailable", "审核节点测试未配置")
+		return
+	}
+	endpoint := storage.AIEndpoint{BaseURL: node.BaseURL, Model: node.Model, APIKey: node.APIKey, TimeoutMS: node.TimeoutMS, MaxConcurrency: 1}
+	latency, testErr := s.TestAI(r, endpoint)
+	if testErr != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "message": "节点测试失败"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": latency.Milliseconds(), "message": "节点响应正常"})
 }
 
 func (s *Server) reviewJobs(w http.ResponseWriter, r *http.Request) {

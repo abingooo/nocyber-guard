@@ -100,6 +100,61 @@ func TestAsyncNodesAcceptSecretsButNeverReturnThem(t *testing.T) {
 	}
 }
 
+func TestAsyncNodeTestUsesUnsavedFormAndPreservesStoredSecret(t *testing.T) {
+	_, handler, session, csrf := newAuthenticatedAdmin(t)
+	calls := 0
+	handler.server.TestAI = func(_ *http.Request, endpoint storage.AIEndpoint) (time.Duration, error) {
+		calls++
+		if endpoint.BaseURL != "https://draft.example/v1" || endpoint.Model != "draft-model" || endpoint.MaxConcurrency != 1 {
+			t.Fatalf("unexpected async test endpoint: %+v", endpoint)
+		}
+		wantKey := "draft-secret"
+		if calls > 1 {
+			wantKey = "stored-secret"
+		}
+		if endpoint.APIKey != wantKey {
+			t.Fatalf("async test API key=%q want %q", endpoint.APIKey, wantKey)
+		}
+		return 9 * time.Millisecond, nil
+	}
+
+	draft := map[string]any{
+		"slot": "async_1", "name": "draft", "base_url": "https://draft.example/v1",
+		"model": "draft-model", "api_key": "draft-secret", "timeout_ms": 15000, "enabled": true,
+	}
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/ai-nodes/async_1/test", draft)
+	if rr.Code != http.StatusOK || calls != 1 {
+		t.Fatalf("unsaved async test status=%d calls=%d body=%q", rr.Code, calls, rr.Body.String())
+	}
+
+	input := map[string]any{"nodes": []map[string]any{
+		{"slot": "async_1", "name": "one", "base_url": "https://draft.example/v1", "model": "draft-model", "api_key": "stored-secret", "timeout_ms": 15000, "enabled": true},
+		{"slot": "async_2", "name": "two", "base_url": "https://two.example/v1", "model": "m2", "api_key": "secret-two", "timeout_ms": 15000, "enabled": true},
+		{"slot": "async_3", "name": "three", "base_url": "https://three.example/v1", "model": "m3", "api_key": "secret-three", "timeout_ms": 15000, "enabled": true},
+	}}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/ai-nodes", input)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("async node setup status=%d body=%q", rr.Code, rr.Body.String())
+	}
+
+	draft["api_key"] = ""
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/ai-nodes/async_1/test", draft)
+	if rr.Code != http.StatusOK || calls != 2 {
+		t.Fatalf("async test with stored key status=%d calls=%d body=%q", rr.Code, calls, rr.Body.String())
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/ai-nodes/async_1/test", map[string]any{})
+	if rr.Code != http.StatusOK || calls != 3 {
+		t.Fatalf("legacy stored async test status=%d calls=%d body=%q", rr.Code, calls, rr.Body.String())
+	}
+
+	draft["slot"] = "async_2"
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/ai-nodes/async_1/test", draft)
+	assertErrorCode(t, rr, http.StatusBadRequest, "invalid_ai_node")
+	if calls != 3 {
+		t.Fatalf("mismatched slot reached test callback; calls=%d", calls)
+	}
+}
+
 func TestConfigUsesFixedUpstreamAndRejectsInvalidUpdates(t *testing.T) {
 	store, handler, session, csrf := newAuthenticatedAdmin(t)
 	ctx := context.Background()

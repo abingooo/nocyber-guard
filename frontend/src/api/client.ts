@@ -104,6 +104,28 @@ function configUpdateBody(config: GuardConfig) {
   }
 }
 
+function aiEndpointWriteBody(endpoint: AIEndpoint) {
+  return {
+    base_url: endpoint.base_url.trim(),
+    model: endpoint.model.trim(),
+    api_key: endpoint.api_key || '',
+    timeout_ms: endpoint.timeout_ms,
+    max_concurrency: endpoint.max_concurrency,
+  }
+}
+
+function aiNodeWriteBody(node: AINode) {
+  return {
+    slot: node.slot,
+    name: node.name.trim(),
+    base_url: node.base_url.trim(),
+    model: node.model.trim(),
+    api_key: node.api_key || '',
+    timeout_ms: node.timeout_ms,
+    enabled: node.enabled,
+  }
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<LoginResponse>('/auth/login', {
@@ -152,16 +174,22 @@ export const api = {
       body: JSON.stringify(configUpdateBody(config)),
     }),
   updateAIEndpoint: (endpoint: AIEndpoint) =>
-    request<AIEndpoint>('/ai-endpoint', { method: 'PUT', body: JSON.stringify(endpoint) }),
+    request<AIEndpoint>('/ai-endpoint', { method: 'PUT', body: JSON.stringify(aiEndpointWriteBody(endpoint)) }),
   testAIEndpoint: (endpoint: AIEndpoint) =>
     request<{ ok: boolean; latency_ms?: number; message?: string }>('/ai-endpoint/test', {
       method: 'POST',
-      body: JSON.stringify(endpoint),
+      body: JSON.stringify(aiEndpointWriteBody(endpoint)),
     }),
   updateAINodes: (nodes: AINode[]) =>
-    request<{ items: AINode[] }>('/ai-nodes', { method: 'PUT', body: JSON.stringify({ nodes }) }),
-  testAINode: (slot: AINode['slot']) =>
-    request<{ ok: boolean; latency_ms?: number; message?: string }>(`/ai-nodes/${encodeURIComponent(slot)}/test`, { method: 'POST', body: '{}' }),
+    request<{ items: AINode[] }>('/ai-nodes', {
+      method: 'PUT',
+      body: JSON.stringify({ nodes: nodes.map(aiNodeWriteBody) }),
+    }),
+  testAINode: (node: AINode) =>
+    request<{ ok: boolean; latency_ms?: number; message?: string }>(`/ai-nodes/${encodeURIComponent(node.slot)}/test`, {
+      method: 'POST',
+      body: JSON.stringify(aiNodeWriteBody(node)),
+    }),
 }
 
-export const apiInternals = { unwrap, queryString, readCookie, configUpdateBody }
+export const apiInternals = { unwrap, queryString, readCookie, configUpdateBody, aiEndpointWriteBody, aiNodeWriteBody }

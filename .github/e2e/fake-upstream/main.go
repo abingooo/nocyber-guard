@@ -76,6 +76,8 @@ func main() {
 			streamEvents(w)
 		case "/ws":
 			serveWebSocket(w, r)
+		case "/v1/chat/completions":
+			serveAIReview(w, r)
 		default:
 			echo(w, r)
 		}
@@ -90,6 +92,36 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func serveAIReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	allowed := map[string]bool{
+		"Bearer e2e-sync-secret":  true,
+		"Bearer e2e-draft-secret": true,
+		"Bearer e2e-async-1":      true,
+		"Bearer e2e-async-2":      true,
+		"Bearer e2e-async-3":      true,
+	}
+	if !allowed[r.Header.Get("Authorization")] {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil || !bytes.Contains(body, []byte(`"messages"`)) {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"choices": []map[string]any{{
+			"message": map[string]string{
+				"content": `{"result":"pass","confidence":0.99,"reason":"compose e2e","category":"benign"}`,
+			},
+		}},
+	})
 }
 
 func (c *requestCounter) add(route string) {

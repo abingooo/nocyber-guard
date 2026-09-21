@@ -172,7 +172,7 @@ async function saveAsyncNodes() {
 async function testAsyncNode(node: AINode) {
   asyncTestResult.value[node.slot] = { ok: false, message: '测试中…' }
   try {
-    const result = await api.testAINode(node.slot)
+    const result = await api.testAINode({ ...node, api_key: node.api_key || '' })
     asyncTestResult.value[node.slot] = { ok: result.ok, message: result.message || (result.ok ? '节点响应正常' : '节点测试未通过'), latency: result.latency_ms }
   } catch (requestError) {
     asyncTestResult.value[node.slot] = { ok: false, message: requestError instanceof ApiError ? requestError.message : '节点连接失败' }
@@ -400,7 +400,7 @@ onMounted(load)
           <span class="readonly-value">风险 2/3 · 可信 2/3</span>
         </div>
         <div v-for="node in asyncNodes" :key="node.slot" class="async-node-card">
-          <div class="async-node-heading"><strong>{{ node.slot }}</strong><span>{{ node.has_api_key ? '密钥已配置' : '未配置密钥' }}</span><button type="button" class="secondary-button" :disabled="!node.base_url || !node.model" @click="testAsyncNode(node)"><TestTube2 :size="15" />测试</button></div>
+          <div class="async-node-heading"><strong>{{ node.slot }}</strong><span>{{ node.api_key ? '待保存新密钥' : node.has_api_key ? '密钥已配置' : '未配置密钥' }}</span><button type="button" class="secondary-button" :disabled="!node.base_url || !node.model" @click="testAsyncNode(node)"><TestTube2 :size="15" />测试</button></div>
           <div class="settings-form-grid">
             <label class="field-label">名称<input v-model="node.name" /></label>
             <label class="field-label">Base URL<input v-model="node.base_url" type="url" placeholder="https://api.example.com/v1" /></label>

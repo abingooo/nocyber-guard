@@ -156,10 +156,88 @@ func (s *suite) runPrimary() error {
 	if err := s.login(); err != nil {
 		return err
 	}
+	if err := s.checkAdminSettings(); err != nil {
+		return err
+	}
 	if err := s.checkRiskBlock(); err != nil {
 		return err
 	}
 	return s.checkAuditedFailOpen()
+}
+
+func (s *suite) checkAdminSettings() error {
+	syncNode := map[string]any{
+		"base_url": s.upstreamURL + "/v1", "model": "e2e-reviewer", "api_key": "e2e-sync-secret",
+		"timeout_ms": 15000, "max_concurrency": 4,
+	}
+	response, body, _, err := s.adminJSON(http.MethodPut, "/api/v1/ai-endpoint", mustJSON(syncNode))
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(body, []byte("e2e-sync-secret")) {
+		return fmt.Errorf("synchronous AI node save failed: status=%d err=%v", responseStatus(response), err)
+	}
+	syncNode["api_key"] = ""
+	response, body, _, err = s.adminJSON(http.MethodPost, "/api/v1/ai-endpoint/test", mustJSON(syncNode))
+	if err != nil || response.StatusCode != http.StatusOK || !jsonOK(body) {
+		return fmt.Errorf("synchronous AI node test failed: status=%d err=%v body=%s", responseStatus(response), err, body)
+	}
+
+	draft := map[string]any{
+		"slot": "async_1", "name": "draft", "base_url": s.upstreamURL + "/v1", "model": "e2e-reviewer",
+		"api_key": "e2e-draft-secret", "timeout_ms": 15000, "enabled": true,
+	}
+	response, body, _, err = s.adminJSON(http.MethodPost, "/api/v1/ai-nodes/async_1/test", mustJSON(draft))
+	if err != nil || response.StatusCode != http.StatusOK || !jsonOK(body) {
+		return fmt.Errorf("unsaved asynchronous AI node test failed: status=%d err=%v body=%s", responseStatus(response), err, body)
+	}
+
+	nodes := []map[string]any{}
+	for index, slot := range []string{"async_1", "async_2", "async_3"} {
+		nodes = append(nodes, map[string]any{
+			"slot": slot, "name": fmt.Sprintf("node %d", index+1), "base_url": s.upstreamURL + "/v1",
+			"model": "e2e-reviewer", "api_key": fmt.Sprintf("e2e-async-%d", index+1), "timeout_ms": 15000, "enabled": true,
+		})
+	}
+	response, body, _, err = s.adminJSON(http.MethodPut, "/api/v1/ai-nodes", mustJSON(map[string]any{"nodes": nodes}))
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(body, []byte("e2e-async-")) {
+		return fmt.Errorf("asynchronous AI node save failed: status=%d err=%v", responseStatus(response), err)
+	}
+	for _, node := range nodes {
+		node["api_key"] = ""
+	}
+	response, body, _, err = s.adminJSON(http.MethodPut, "/api/v1/ai-nodes", mustJSON(map[string]any{"nodes": nodes}))
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(body, []byte("e2e-async-")) {
+		return fmt.Errorf("asynchronous AI key-preserving save failed: status=%d err=%v", responseStatus(response), err)
+	}
+	response, body, _, err = s.adminJSON(http.MethodPost, "/api/v1/ai-nodes/async_1/test", mustJSON(nodes[0]))
+	if err != nil || response.StatusCode != http.StatusOK || !jsonOK(body) {
+		return fmt.Errorf("saved asynchronous AI node test failed: status=%d err=%v body=%s", responseStatus(response), err, body)
+	}
+	response, body, _, err = s.adminJSON(http.MethodGet, "/api/v1/ai-nodes", nil)
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(body, []byte("e2e-async-")) || !bytes.Contains(body, []byte(`"has_api_key":true`)) {
+		return fmt.Errorf("asynchronous AI node readback failed: status=%d err=%v", responseStatus(response), err)
+	}
+	return nil
+}
+
+func mustJSON(value any) []byte {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func jsonOK(body []byte) bool {
+	var value struct {
+		OK bool `json:"ok"`
+	}
+	return json.Unmarshal(body, &value) == nil && value.OK
+}
+
+func responseStatus(response *http.Response) int {
+	if response == nil {
+		return 0
+	}
+	return response.StatusCode
 }
 
 func (s *suite) runPersistence() error {

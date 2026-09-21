@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.3 - 2026-09-21
+
+- Fixed synchronous and asynchronous AI node saves by allowlisting only fields accepted by the strict management APIs.
+- Changed asynchronous connection tests to use the current form values, including unsaved nodes, while safely reusing a stored API key when the key field is left blank.
+- Added frontend request-contract coverage and real-container E2E checks for synchronous save/test, all three asynchronous node saves, unsaved-node tests, and stored-key preservation.
+
 ## v0.3.2 - 2026-09-21
 
 - Fixed Guard configuration updates being rejected because response-only asynchronous quorum metadata was sent back to the strict update endpoint.
