@@ -527,13 +527,18 @@ func (s *Server) hashCollection(w http.ResponseWriter, r *http.Request, path str
 		writeJSON(w, 200, items)
 	case http.MethodPost:
 		var in struct {
-			SHA256 string `json:"sha256"`
-			Label  string `json:"label"`
+			SHA256  string `json:"sha256"`
+			Label   string `json:"label"`
+			Content string `json:"content"`
 		}
-		if !decodeJSON(w, r, &in) {
+		if !decodeJSONLimit(w, r, &in, 128<<20) {
 			return
 		}
-		item, err := s.Store.AddHash(r.Context(), kind, in.SHA256, in.Label)
+		if in.Content == "" {
+			writeError(w, 400, "rule_content_required", "规则原文不能为空")
+			return
+		}
+		item, err := s.Store.AddHashWithContent(r.Context(), kind, in.SHA256, in.Label, in.Content)
 		if err != nil {
 			writeError(w, 400, "invalid_hash", err.Error())
 			return
@@ -559,13 +564,14 @@ func (s *Server) hashItem(w http.ResponseWriter, r *http.Request, path string) {
 	switch r.Method {
 	case http.MethodPut:
 		var input struct {
-			Label   string `json:"label"`
-			Enabled bool   `json:"enabled"`
+			Label   string  `json:"label"`
+			Enabled bool    `json:"enabled"`
+			Content *string `json:"content,omitempty"`
 		}
-		if !decodeJSON(w, r, &input) {
+		if !decodeJSONLimit(w, r, &input, 128<<20) {
 			return
 		}
-		item, err := s.Store.UpdateHash(r.Context(), kind, id, input.Label, input.Enabled)
+		item, err := s.Store.UpdateHashWithContent(r.Context(), kind, id, input.Label, input.Enabled, input.Content)
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, 404, "hash_not_found", "规则不存在")
 			return
@@ -761,7 +767,11 @@ func (s *Server) eventItem(w http.ResponseWriter, r *http.Request, path string) 
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return decodeJSONLimit(w, r, out, 1<<20)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {

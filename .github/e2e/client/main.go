@@ -469,13 +469,17 @@ func (s *suite) checkRiskBlock() error {
 	prompt := guardedPrompt()
 	digest := sha256.Sum256([]byte(prompt))
 	hash := hex.EncodeToString(digest[:])
-	payload, _ := json.Marshal(map[string]string{"sha256": hash, "label": "compose E2E rule"})
+	payload, _ := json.Marshal(map[string]string{"sha256": hash, "label": "compose E2E rule", "content": prompt})
 	response, _, _, err := s.adminJSON(http.MethodPost, "/api/v1/risk-hashes", payload)
 	if err != nil {
 		return err
 	}
 	if response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("risk rule creation returned status %d", response.StatusCode)
+	}
+	response, rulesBody, _, err := s.adminJSON(http.MethodGet, "/api/v1/risk-hashes", nil)
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(rulesBody, []byte(prompt)) {
+		return errors.New("risk rule API did not expose its stored plaintext to the authenticated admin")
 	}
 	before, err := s.stats()
 	if err != nil {

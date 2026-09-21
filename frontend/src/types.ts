@@ -61,6 +61,7 @@ export interface HashEntry {
   id: number | string
   sha256: string
   label: string
+  content: string
   source?: string
   enabled: boolean
   created_at: string

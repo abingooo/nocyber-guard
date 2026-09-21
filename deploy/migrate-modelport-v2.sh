@@ -2,9 +2,11 @@
 set -eu
 
 # This helper never accepts or prints a database password, API key,
-# ciphertext, prompt content, or administrator password. Source access uses a
-# local docker exec; target access uses an administrator cookie created
-# outside this script.
+# ciphertext, or administrator password. Source export does not extract
+# prompt content. An operator may add reviewed rule content to the migration
+# file before import; the target verifies it against the exported hash. Source
+# access uses a local docker exec; target access uses an administrator cookie
+# created outside this script.
 
 usage() {
     cat >&2 <<'EOF'
@@ -35,7 +37,8 @@ validate_export() {
       def hash_row:
         ((.kind == "trusted" or .kind == "risk") and
          (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-         (.label | type == "string"));
+         (.label | type == "string") and
+         ((has("content") | not) or (.content | type == "string" and length > 0)));
       def matcher:
         ((.type == "prefix" or .type == "exact" or .type == "regex") and
          (.value | type == "string" and length > 0));
@@ -76,7 +79,7 @@ validate_export() {
         ([.[] | select(.kind == "risk") | .sha256] | unique | length) and
       ([.[] | .. | objects |
         select(has("api_key") or has("api_key_ciphertext") or
-               has("raw_ciphertext") or has("raw") or has("content"))] | length) == 0 and
+               has("raw_ciphertext") or has("raw"))] | length) == 0 and
       $meta.trusted_count == ([.[] | select(.kind == "trusted")] | length) and
       $meta.risk_count == ([.[] | select(.kind == "risk")] | length) and
       $meta.client_profile_count == 3 and
@@ -191,7 +194,7 @@ SQL
         [ -r "$input" ] || die "input file is not readable"
         [ "$dry_run" = false ] || usage
         validate_export "$input" || die "input file does not match the supported migration contract"
-        printf 'Validation complete: migration file is structurally valid and contains no secret fields.\n'
+        printf 'Validation complete: migration file is structurally valid and contains no credentials or ciphertext.\n'
         ;;
     import)
         need curl
@@ -258,12 +261,16 @@ SQL
         while IFS= read -r item; do
             kind=$(printf '%s' "$item" | jq -r '.kind')
             sha=$(printf '%s' "$item" | jq -r '.sha256')
-            body=$(printf '%s' "$item" | jq -c '{sha256:.sha256,label:.label}')
+            content=$(printf '%s' "$item" | jq -r '.content // empty')
             existing_file=$trusted_file
             [ "$kind" = trusted ] || existing_file=$risk_file
             if jq -e --arg sha "$sha" 'any(.[]; .sha256 == $sha)' "$existing_file" >/dev/null; then
                 rules_skipped=$((rules_skipped + 1))
+            elif [ -z "$content" ]; then
+                # v0.4 never creates a new rule without its exact plaintext.
+                rules_skipped=$((rules_skipped + 1))
             else
+                body=$(printf '%s' "$item" | jq -c '{sha256:.sha256,label:.label,content:.content}')
                 rules_created=$((rules_created + 1))
                 if [ "$dry_run" = false ]; then
                     write_json POST "/api/v1/$kind-hashes" "$body"

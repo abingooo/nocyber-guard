@@ -212,4 +212,27 @@ describe('API client request policy', () => {
     expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('csrf-token')
     expect(JSON.parse(String(init.body))).toEqual({ label: 'canary', enabled: false })
   })
+
+  it('creates and backfills hash plaintext through the normal admin session', async () => {
+    document.cookie = 'ncg_csrf=csrf-token; Path=/'
+    const plaintext = '  exact rule\nwith whitespace  '
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: { id: 13, sha256: 'a'.repeat(64), label: 'plain', content: plaintext, enabled: true } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { id: 14, sha256: 'b'.repeat(64), label: 'legacy', content: plaintext, enabled: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.createHash('trusted', { sha256: '', label: 'plain', content: plaintext })
+    await api.updateHash('risk', 14, { label: 'legacy', enabled: true, content: plaintext })
+
+    const [createURL, createInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(createURL).toBe('/api/v1/trusted-hashes')
+    expect(createInit.method).toBe('POST')
+    expect(JSON.parse(String(createInit.body))).toEqual({ sha256: '', label: 'plain', content: plaintext })
+
+    const [updateURL, updateInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(updateURL).toBe('/api/v1/risk-hashes/14')
+    expect(updateInit.method).toBe('PUT')
+    expect(JSON.parse(String(updateInit.body))).toEqual({ label: 'legacy', enabled: true, content: plaintext })
+    expect(new Headers(updateInit.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
 })

@@ -54,8 +54,9 @@ func TestOpenIsIdempotentAndDataSurvivesRestart(t *testing.T) {
 		t.Fatalf("PutConfig: %v", err)
 	}
 
-	hash := strings.Repeat("a", 64)
-	if _, err := first.AddHash(ctx, "trusted", hash, "persisted hash"); err != nil {
+	ruleContent := "  persisted rule\nwith exact whitespace  "
+	hash := hashPlaintext(ruleContent)
+	if _, err := first.AddHashWithContent(ctx, "trusted", hash, "persisted hash", ruleContent); err != nil {
 		t.Fatalf("AddHash: %v", err)
 	}
 
@@ -89,6 +90,112 @@ func TestOpenIsIdempotentAndDataSurvivesRestart(t *testing.T) {
 	}
 	if !found || match.Kind != "trusted" || match.Note != "persisted hash" {
 		t.Fatalf("restored hash = (%+v, found=%v), want trusted persisted hash", match, found)
+	}
+	entries, err := reopened.ListHashes(ctx, "trusted")
+	if err != nil || len(entries) != 1 || entries[0].Content != ruleContent {
+		t.Fatalf("restored plaintext entries = (%+v, %v)", entries, err)
+	}
+}
+
+func TestHashPlaintextValidationAndLegacyBackfill(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	content := "精确原文\n  包含空格"
+	hash := hashPlaintext(content)
+
+	if _, err := store.AddHashWithContent(ctx, "risk", strings.Repeat("f", 64), "mismatch", content); err == nil {
+		t.Fatal("mismatched rule plaintext was accepted")
+	}
+	legacy, err := store.AddHash(ctx, "risk", hash, "legacy")
+	if err != nil || legacy.Content != "" {
+		t.Fatalf("legacy hash-only rule = (%+v, %v)", legacy, err)
+	}
+	if err := store.StoreHashContent(ctx, "risk", hash, content); err != nil {
+		t.Fatalf("StoreHashContent: %v", err)
+	}
+	entries, err := store.ListHashes(ctx, "risk")
+	if err != nil || len(entries) != 1 || entries[0].Content != content {
+		t.Fatalf("backfilled rules = (%+v, %v)", entries, err)
+	}
+}
+
+func TestRulePlaintextMigrationUpgradesV03Database(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "nocyber-guard.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	_, err = legacy.ExecContext(ctx, `
+		CREATE TABLE trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+		CREATE TABLE risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+		CREATE TABLE review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL DEFAULT '');
+		INSERT INTO trusted_hashes(sha256,label,source,enabled,created_at) VALUES(?,?,?,?,?);
+		INSERT INTO risk_hashes(sha256,label,source,enabled,created_at) VALUES(?,?,?,?,?)`,
+		strings.Repeat("a", 64), "legacy trusted", "import", 1, time.Now().UTC().Format(time.RFC3339Nano),
+		strings.Repeat("b", 64), "legacy risk", "import", 1, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatalf("create v0.3 schema: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v0.3 database: %v", err)
+	}
+
+	store, err := Open(ctx, dataDir, []byte("migration-master-key"))
+	if err != nil {
+		t.Fatalf("upgrade v0.3 database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, kind := range []string{"trusted", "risk"} {
+		entries, listErr := store.ListHashes(ctx, kind)
+		if listErr != nil || len(entries) != 1 || entries[0].Content != "" {
+			t.Fatalf("%s migrated rules = (%+v, %v)", kind, entries, listErr)
+		}
+	}
+	var migrationCount int
+	if err := store.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version=4").Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("plaintext migration marker = (%d, %v), want (1, nil)", migrationCount, err)
+	}
+	var contentCiphertext []byte
+	if err := store.db.QueryRowContext(ctx, "SELECT content_ciphertext FROM review_jobs LIMIT 1").Scan(&contentCiphertext); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("review_jobs content column probe error = %v, want no rows", err)
+	}
+}
+
+func TestRulePlaintextMigrationRecoversCompleteBlockingEvidence(t *testing.T) {
+	ctx := context.Background()
+	store, dataDir, masterKey := openTestStore(t)
+	content := "legacy blocked rule with exact plaintext"
+	hash := hashPlaintext(content)
+	if _, err := store.AddHash(ctx, "risk", hash, "legacy risk"); err != nil {
+		t.Fatalf("AddHash: %v", err)
+	}
+	event := testAuditEvent("v4-backfill-event", time.Now().UTC())
+	event.SHA256 = hash
+	event.Decision = "block"
+	event.Outcome = audit.EventOutcomeBlock
+	event.Reason = audit.ReasonRiskHashMatch
+	if err := store.RecordBlockedEvent(ctx, event, "instructions", content); err != nil {
+		t.Fatalf("RecordBlockedEvent: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=4"); err != nil {
+		t.Fatalf("remove v4 marker: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close pre-v4 database: %v", err)
+	}
+
+	reopened, err := Open(ctx, dataDir, masterKey)
+	if err != nil {
+		t.Fatalf("reopen with v4 migration: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	entries, err := reopened.ListHashes(ctx, "risk")
+	if err != nil || len(entries) != 1 || entries[0].Content != content {
+		t.Fatalf("recovered risk plaintext = (%+v, %v)", entries, err)
 	}
 }
 
@@ -403,24 +510,29 @@ func TestAsyncNodesJobsVotesAndPromotion(t *testing.T) {
 	if err != nil || len(nodes) != 1 || nodes[0].APIKey != "secret" || !nodes[0].HasAPIKey {
 		t.Fatalf("ListAINodes=%+v err=%v", nodes, err)
 	}
-	hash := strings.Repeat("b", 64)
-	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", false)
+	original := "original promoted rule"
+	hash := hashPlaintext(original)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", original, false)
 	if err != nil || !created || job.ID == 0 {
 		t.Fatalf("CreateReviewJob=%+v created=%v err=%v", job, created, err)
 	}
-	jobAgain, createdAgain, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", false)
+	jobAgain, createdAgain, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "sample", original, false)
 	if err != nil || createdAgain || jobAgain.ID != job.ID {
 		t.Fatalf("duplicate job=%+v created=%v err=%v", jobAgain, createdAgain, err)
 	}
 	if err := store.RecordReviewVote(ctx, ReviewVote{JobID: job.ID, NodeSlot: "async_1", Result: "reject", Confidence: .99, Reason: "risk", Category: "risk"}); err != nil {
 		t.Fatalf("RecordReviewVote: %v", err)
 	}
-	if err := store.PromoteHash(ctx, job.ID, hash, "risk", "async_1:reject:.990"); err != nil {
+	if err := store.PromoteHash(ctx, job.ID, hash, "risk", original, "async_1:reject:.990"); err != nil {
 		t.Fatalf("PromoteHash: %v", err)
 	}
 	match, found, err := store.LookupHash(ctx, hash)
 	if err != nil || !found || match.Kind != "risk" {
 		t.Fatalf("LookupHash=%+v found=%v err=%v", match, found, err)
+	}
+	entries, err := store.ListHashes(ctx, "risk")
+	if err != nil || len(entries) != 1 || entries[0].Content != original {
+		t.Fatalf("promoted plaintext rules = (%+v, %v)", entries, err)
 	}
 	jobs, err := store.ListReviewJobs(ctx, 10)
 	if err != nil || len(jobs) != 1 {
@@ -435,8 +547,9 @@ func TestAsyncNodesJobsVotesAndPromotion(t *testing.T) {
 func TestReviewJobClaimRetryAndStaleRecovery(t *testing.T) {
 	ctx := context.Background()
 	store, _, _ := openTestStore(t)
-	hash := strings.Repeat("c", 64)
-	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "encrypted sample", false)
+	original := "encrypted original"
+	hash := hashPlaintext(original)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "model", "encrypted sample", original, false)
 	if err != nil || !created {
 		t.Fatalf("CreateReviewJob = (%+v, %v, %v)", job, created, err)
 	}
@@ -461,6 +574,9 @@ func TestReviewJobClaimRetryAndStaleRecovery(t *testing.T) {
 	}
 	if sample, err := store.LoadReviewJobSample(ctx, job.ID); err != nil || sample != "encrypted sample" {
 		t.Fatalf("recovered sample = (%q, %v)", sample, err)
+	}
+	if content, err := store.LoadReviewJobContent(ctx, job.ID); err != nil || content != original {
+		t.Fatalf("recovered original = (%q, %v)", content, err)
 	}
 }
 

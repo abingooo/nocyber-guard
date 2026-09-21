@@ -149,9 +149,9 @@ export const api = {
     request<EventEvidence>(`/events/${encodeURIComponent(id)}/evidence`),
 
   listHashes: (kind: 'trusted' | 'risk') => request<HashEntry[]>(`/${kind}-hashes`),
-  createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label'>) =>
+  createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label' | 'content'>) =>
     request<HashEntry>(`/${kind}-hashes`, { method: 'POST', body: JSON.stringify(body) }),
-  updateHash: (kind: 'trusted' | 'risk', id: string | number, body: Pick<HashEntry, 'label' | 'enabled'>) =>
+  updateHash: (kind: 'trusted' | 'risk', id: string | number, body: Pick<HashEntry, 'label' | 'enabled'> & { content?: string }) =>
     request<HashEntry>(`/${kind}-hashes/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteHash: (kind: 'trusted' | 'risk', id: string | number) =>
     request<void>(`/${kind}-hashes/${encodeURIComponent(id)}`, { method: 'DELETE' }),

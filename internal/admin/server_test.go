@@ -3,12 +3,15 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,7 +236,9 @@ func TestConfigRequiresExpectedVersionAndRejectsStaleUpdate(t *testing.T) {
 func TestMutationReportsRuntimeReloadFailure(t *testing.T) {
 	_, handler, session, csrf := newAuthenticatedAdmin(t)
 	handler.server.OnReload = func(context.Context) error { return errors.New("reload unavailable") }
-	hash := map[string]any{"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "label": "test"}
+	content := "reload failure rule"
+	digest := sha256.Sum256([]byte(content))
+	hash := map[string]any{"sha256": hex.EncodeToString(digest[:]), "label": "test", "content": content}
 	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/trusted-hashes", hash)
 	assertErrorCode(t, rr, http.StatusServiceUnavailable, "runtime_reload_failed")
 }
@@ -242,14 +247,25 @@ func TestHashCRUD(t *testing.T) {
 	_, handler, session, csrf := newAuthenticatedAdmin(t)
 	reloads := 0
 	handler.server.OnReload = func(context.Context) error { reloads++; return nil }
-	hash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/risk-hashes", map[string]any{"sha256": hash, "label": "before"})
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/risk-hashes", map[string]any{"sha256": strings.Repeat("a", 64), "label": "missing plaintext"})
+	assertErrorCode(t, rr, http.StatusBadRequest, "rule_content_required")
+	content := "  风险规则原文\n保留换行  "
+	digest := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(digest[:])
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/risk-hashes", map[string]any{"sha256": "", "label": "before", "content": content})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%q", rr.Code, rr.Body.String())
 	}
 	var created storage.HashEntry
 	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
+	}
+	if created.SHA256 != hash || created.Content != content {
+		t.Fatalf("created hash plaintext = %+v", created)
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/risk-hashes", nil)
+	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte("风险规则原文")) {
+		t.Fatalf("list plaintext status=%d body=%q", rr.Code, rr.Body.String())
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/risk-hashes/"+strconv.FormatInt(created.ID, 10), map[string]any{"label": "after", "enabled": false})
 	if rr.Code != http.StatusOK {
@@ -259,13 +275,36 @@ func TestHashCRUD(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Label != "after" || updated.Enabled {
+	if updated.Label != "after" || updated.Enabled || updated.Content != content {
 		t.Fatalf("updated hash = %+v", updated)
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodDelete, "/api/v1/risk-hashes/"+strconv.FormatInt(created.ID, 10), nil)
 	if rr.Code != http.StatusNoContent || reloads != 3 {
 		t.Fatalf("delete status=%d reloads=%d body=%q", rr.Code, reloads, rr.Body.String())
 	}
+}
+
+func TestHashPlaintextCanBeBackfilledWithoutExtraCredential(t *testing.T) {
+	store, handler, session, csrf := newAuthenticatedAdmin(t)
+	content := "legacy hash plaintext"
+	digest := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(digest[:])
+	legacy, err := store.AddHash(context.Background(), "trusted", hash, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"label": legacy.Label, "enabled": true, "content": content}
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/trusted-hashes/"+strconv.FormatInt(legacy.ID, 10), payload)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("plaintext backfill status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	var updated storage.HashEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &updated); err != nil || updated.Content != content {
+		t.Fatalf("plaintext backfill = (%+v, %v)", updated, err)
+	}
+	payload["content"] = "wrong plaintext"
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/trusted-hashes/"+strconv.FormatInt(legacy.ID, 10), payload)
+	assertErrorCode(t, rr, http.StatusBadRequest, "invalid_hash")
 }
 
 func TestAdminAPIRequiresSessionAndCSRF(t *testing.T) {

@@ -2,7 +2,7 @@
 
 NoCyber Guard is a small, transparent instruction-audit gateway for
 Sub2API, New API, and other OpenAI-compatible gateways. It sits in front of an
-upstream and forwards requests unchanged after the audit decision. The v0.3
+upstream and forwards requests unchanged after the audit decision. The v0.4
 default is permissive: only an explicit risk decision blocks a request;
 unknown clients, parse failures, and reviewer outages are recorded and passed
 through. Three independent asynchronous reviewers can now vote after a
@@ -12,6 +12,22 @@ promotes it to the trusted library. The first same-kind quorum completes the
 job and cancels outstanding calls. Timeout, error, uncertain, low-confidence,
 or conflicting votes are non-votes and never promote a rule. Promotions affect
 subsequent requests and do not require manual approval.
+
+## Rule plaintext
+
+Every rule created in v0.4 stores both the SHA-256 digest and the exact selected
+instruction text. The server computes or verifies the digest before writing the
+rule. Trusted and risk library pages return and display that plaintext to a
+normally signed-in administrator; there is no second administrator key,
+password prompt, or separate unlock step.
+
+Databases upgraded from an older release can contain historical hash-only rows
+because a SHA-256 digest cannot be reversed. Those rows are visibly marked in
+the library and accept a one-time plaintext backfill. Guard also fills the row
+automatically when the exact instruction is encountered again and its digest
+matches. Request traffic never overwrites plaintext that is already present.
+Plaintext is intentionally excluded from ordinary event rows and application
+logs.
 
 ## Quick start
 
@@ -39,7 +55,7 @@ not commit the value. `NCG_MASTER_KEY_FILE` and
 files; do not define the corresponding direct variable, even as an empty
 string, when using file mode. Local Compose file secrets are bind mounts, so
 make their host files owned by UID/GID `65532` with mode `0400`. The initial
-administrator password is consumed on first initialization. v0.3 does not
+administrator password is consumed on first initialization. v0.4 does not
 expose a password-change endpoint; changing it later requires a separately
 controlled offline administration procedure.
 
@@ -67,7 +83,7 @@ any request bytes were sent. Do not add `non_idempotent` or HTTP response
 status codes to that retry policy.
 
 Keep `Upgrade`, `Connection`, `X-Forwarded-*`, request buffering, and long read
-timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.3
+timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.4
 audits the OpenAI Responses HTTP paths listed in `compatibility.json`; it does
 not inspect WebSocket frames or Chat Completions/Messages bodies.
 
@@ -109,7 +125,7 @@ blindly switch databases or replay POSTs; reconcile the audit records first.
 
 ## Migrating legacy ModelPort V2 rules
 
-v0.3 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
+v0.4 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
 vault, AI-node credentials, users, or events. The old V2 implementation uses
 platform-specific group/profile scopes and encrypted evidence that cannot be
 copied safely into an independent product.
@@ -122,6 +138,13 @@ rules are counted and skipped. With an explicit `NCG_ADMIN_COOKIE_FILE`, its
 idempotent import and dry-run modes compare that data with Guard; they never
 accept, print, or store a password or API key. Review and validate the export
 before import, and repeat it immediately before a production cutover.
+
+Because the ModelPort hash tables do not contain reversible instruction text,
+v0.4 skips hash-only migration rows instead of creating new incomplete rules.
+An operator may add an exact `content` value to a reviewed migration row; the
+Guard API verifies it against `sha256` before import. Rules already present in
+an upgraded Guard database remain available and can be backfilled as described
+above.
 
 The selected AI endpoint URL, model, timeout, and concurrency are transferable;
 its credential must be entered separately in Guard. The three asynchronous

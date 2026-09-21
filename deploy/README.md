@@ -98,6 +98,13 @@ enabled Codex profiles, one synchronous AI-node configuration, and the three
 asynchronous quorum-node configurations without keys. Evidence, credentials,
 users, events, and foreign IDs are never exported.
 
+The source hash tables do not contain reversible prompt text. Starting with
+v0.4, hash-only rows are counted but skipped during import so the target cannot
+create a new incomplete rule. To import a reviewed rule, add its exact,
+non-empty `content` field to that JSON row; Guard validates it against
+`sha256`. Existing rules in an upgraded Guard database remain active and can
+be backfilled from the rule-library page or automatically on their next hit.
+
 Log into the local admin UI first. To create a curl cookie jar without putting
 the password in shell history, read it silently and send it over stdin:
 
@@ -112,7 +119,8 @@ unset NCG_LOGIN_PASSWORD
 ```
 
 Run an idempotent dry-run against the current Guard state first by appending
-`--dry-run` to the following command. The real import creates missing hashes,
+`--dry-run` to the following command. The real import creates missing hashes
+only when exact plaintext is present,
 creates or updates the three named profiles, and applies the synchronous and
 asynchronous AI-node metadata while preserving any keys already entered in
 Guard. Enter all four AI credentials separately before enabling review:

@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -74,8 +75,10 @@ func TestAsyncRuntimeRetriesAndRecoversPersistedJob(t *testing.T) {
 	dataDir := t.TempDir()
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hash := strings.Repeat("a", 64)
-	job := asyncReviewJob{Hash: hash, Field: "instructions", Content: "persisted review sample", Model: "test-model"}
+	ruleContent := "persisted exact rule content"
+	digest := sha256.Sum256([]byte(ruleContent))
+	hash := hex.EncodeToString(digest[:])
+	job := asyncReviewJob{Hash: hash, Field: "instructions", Content: "persisted review sample", RuleContent: ruleContent, Model: "test-model"}
 
 	firstStore, err := storage.Open(ctx, dataDir, masterKey)
 	if err != nil {
@@ -103,6 +106,9 @@ func TestAsyncRuntimeRetriesAndRecoversPersistedJob(t *testing.T) {
 	}
 	if sample, err := firstStore.LoadReviewJobSample(ctx, jobs[0].ID); err != nil || sample != job.Content {
 		t.Fatalf("persisted sample = (%q, %v)", sample, err)
+	}
+	if content, err := firstStore.LoadReviewJobContent(ctx, jobs[0].ID); err != nil || content != job.RuleContent {
+		t.Fatalf("persisted rule content = (%q, %v)", content, err)
 	}
 	if err := firstStore.ScheduleReviewRetry(ctx, jobs[0].ID, "test_retry", time.Second); err != nil {
 		t.Fatal(err)
@@ -144,6 +150,10 @@ func TestAsyncRuntimeRetriesAndRecoversPersistedJob(t *testing.T) {
 	match, found, err := secondStore.LookupHash(ctx, hash)
 	if err != nil || !found || match.Kind != "trusted" {
 		t.Fatalf("recovered promotion = (%+v, %v, %v)", match, found, err)
+	}
+	entries, err := secondStore.ListHashes(ctx, "trusted")
+	if err != nil || len(entries) != 1 || entries[0].Content != ruleContent {
+		t.Fatalf("recovered promotion plaintext = (%+v, %v)", entries, err)
 	}
 }
 

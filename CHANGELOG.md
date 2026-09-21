@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.0 - 2026-09-21
+
+- Added exact plaintext retention to trusted and risk rules, with SHA-256 verification and direct viewing through the normal authenticated administration UI.
+- Required plaintext for all newly created manual rules and carried the complete selected field through asynchronous AI promotion without exposing it in ordinary event records or logs.
+- Added automatic first-hit backfill and manual backfill for legacy hash-only rules; existing plaintext is never overwritten by request traffic.
+- Added schema-v4 upgrades, encrypted in-flight job recovery, API/UI regression coverage, and real-container checks for plaintext persistence.
+
 ## v0.3.3 - 2026-09-21
 
 - Fixed synchronous and asynchronous AI node saves by allowlisting only fields accepted by the strict management APIs.

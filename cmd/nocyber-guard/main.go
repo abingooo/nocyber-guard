@@ -60,11 +60,12 @@ func (rules ruleSnapshot) LookupHash(_ context.Context, sha string) (audit.HashM
 }
 
 type asyncReviewJob struct {
-	Hash    string
-	Field   string
-	Content string
-	Sampled bool
-	Model   string
+	Hash        string
+	Field       string
+	Content     string
+	RuleContent string
+	Sampled     bool
+	Model       string
 }
 
 type asyncRuntime struct {
@@ -139,7 +140,17 @@ func (ar *asyncRuntime) recoverDue() {
 		if err != nil || sample == "" {
 			continue
 		}
-		if !ar.enqueue(asyncReviewJob{Hash: record.SHA256, Field: record.FieldName, Content: sample, Sampled: record.Sampled, Model: record.Model}) {
+		ruleContent, contentErr := ar.store.LoadReviewJobContent(ctx, record.ID)
+		if contentErr != nil {
+			ar.logger.Warn("async_review_content_recovery_failed", "job_id", record.ID, "error", contentErr)
+		}
+		if ruleContent == "" && !record.Sampled && plaintextHash(sample) == record.SHA256 {
+			// Pre-v0.4 jobs stored only the reviewer input. It is safe to
+			// reuse that value only when it was not sampled and its digest
+			// proves it is the exact selected field.
+			ruleContent = sample
+		}
+		if !ar.enqueue(asyncReviewJob{Hash: record.SHA256, Field: record.FieldName, Content: sample, RuleContent: ruleContent, Sampled: record.Sampled, Model: record.Model}) {
 			return
 		}
 	}
@@ -157,7 +168,7 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Content, job.Sampled)
+	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Content, job.RuleContent, job.Sampled)
 	if err != nil {
 		ar.logger.Warn("async_review_job_create_failed", "sha256", job.Hash, "error", err)
 		return
@@ -168,6 +179,12 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 		}
 		if sample, sampleErr := ar.store.LoadReviewJobSample(ctx, record.ID); sampleErr == nil && sample != "" {
 			job.Content = sample
+		}
+		if content, contentErr := ar.store.LoadReviewJobContent(ctx, record.ID); contentErr == nil && content != "" {
+			job.RuleContent = content
+		}
+		if job.RuleContent == "" && !record.Sampled && plaintextHash(job.Content) == record.SHA256 {
+			job.RuleContent = job.Content
 		}
 	}
 	claimed, err := ar.store.ClaimReviewJob(ctx, record.ID)
@@ -192,7 +209,7 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 	kind, promoted := votes.Kind, votes.Reached && !votes.Conflict
 	if promoted {
 		summary := makeVoteSummary(votes.Votes)
-		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, summary); err != nil {
+		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, job.RuleContent, summary); err != nil {
 			ar.logger.Warn("async_rule_promotion_failed", "job_id", record.ID, "error", err)
 			_ = ar.store.CompleteReviewJob(ctx, record.ID, "failed", "")
 			return
@@ -225,6 +242,11 @@ func makeVoteSummary(votes []audit.AsyncVote) string {
 		parts = append(parts, fmt.Sprintf("%s:%s:%.3f", vote.Slot, vote.Verdict.Result, vote.Verdict.Confidence))
 	}
 	return strings.Join(parts, ",")
+}
+
+func plaintextHash(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(digest[:])
 }
 
 func main() {
@@ -501,12 +523,26 @@ func (a auditorAdapter) Evaluate(ctx context.Context, req *http.Request, body []
 	}
 	id := eventRequestID(req.Header.Get("X-Request-ID"))
 	result := state.engine.Evaluate(ctx, audit.Request{ID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: audit.ProtocolResponses, UserAgent: req.UserAgent(), Body: body, APIKeyFingerprint: a.apiKeyFingerprint(req.Header.Get("Authorization")), ClientIP: a.clientIP(req)})
+	if result.Hash != "" && result.RuleContent != "" {
+		kind := ""
+		switch result.Reason {
+		case audit.ReasonTrustedHashMatch:
+			kind = "trusted"
+		case audit.ReasonRiskHashMatch:
+			kind = "risk"
+		}
+		if kind != "" {
+			if err := a.runtime.store.StoreHashContent(ctx, kind, result.Hash, result.RuleContent); err != nil {
+				a.runtime.logger.Warn("hash_content_backfill_failed", "kind", kind, "sha256", result.Hash, "error", err)
+			}
+		}
+	}
 	// Async quorum review is deliberately detached from the request path. It
 	// never changes the current decision and only promotes rules for later
 	// requests after a complete vote is persisted.
 	if a.runtime.asyncRunner != nil && result.Hash != "" && result.Field != "" && result.Reason != audit.ReasonTrustedHashMatch && result.Reason != audit.ReasonRiskHashMatch {
 		if result.ReviewContent != "" {
-			a.runtime.asyncRunner.enqueue(asyncReviewJob{Hash: result.Hash, Field: result.Field, Content: result.ReviewContent, Sampled: result.AISampled, Model: result.Model})
+			a.runtime.asyncRunner.enqueue(asyncReviewJob{Hash: result.Hash, Field: result.Field, Content: result.ReviewContent, RuleContent: result.RuleContent, Sampled: result.AISampled, Model: result.Model})
 		}
 	}
 	return proxy.Decision{Allow: result.Allow, Blocked: result.Blocked, Reason: string(result.Reason), RequestID: id, AuditMs: result.AuditLatency.Milliseconds(), UAProfile: result.ProfileKey, Field: result.Field, Hash: result.Hash, Model: result.Model}, nil

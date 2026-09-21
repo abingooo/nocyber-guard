@@ -262,10 +262,14 @@ type Result struct {
 	// It is never persisted in ordinary events and is consumed only by the
 	// in-process queue after the synchronous decision has completed.
 	ReviewContent string
-	Model         string
-	AIVerdict     *AIVerdict
-	AuditLatency  time.Duration
-	AILatency     time.Duration
+	// RuleContent is the exact selected field used to calculate Hash. It stays
+	// out of ordinary events and is used only to persist plaintext alongside a
+	// promoted or previously hash-only rule.
+	RuleContent  string
+	Model        string
+	AIVerdict    *AIVerdict
+	AuditLatency time.Duration
+	AILatency    time.Duration
 }
 
 func (r Result) IsFailOpen() bool {

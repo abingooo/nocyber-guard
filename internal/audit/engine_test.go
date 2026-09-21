@@ -64,7 +64,7 @@ func TestEngineRiskTrustedAndAIOrder(t *testing.T) {
 		return AIVerdict{Result: VerdictPass, Confidence: 1, Reason: "ok", Category: "benign"}, nil
 	}), trusted)
 	result := engine.Evaluate(context.Background(), testRequest(body))
-	if !result.Blocked || result.Reason != ReasonRiskHashMatch || called != 0 || trusted.blockedCalls != 1 {
+	if !result.Blocked || result.Reason != ReasonRiskHashMatch || result.RuleContent != "danger" || called != 0 || trusted.blockedCalls != 1 {
 		t.Fatalf("risk result=%#v called=%d blockedCalls=%d", result, called, trusted.blockedCalls)
 	}
 
@@ -74,7 +74,7 @@ func TestEngineRiskTrustedAndAIOrder(t *testing.T) {
 		return AIVerdict{Result: VerdictReject, Confidence: 1, Reason: "bad", Category: "risk"}, nil
 	}), &testEventSink{})
 	result = engine.Evaluate(context.Background(), testRequest(body))
-	if !result.Allow || result.Blocked || result.Reason != ReasonTrustedHashMatch || called != 0 {
+	if !result.Allow || result.Blocked || result.Reason != ReasonTrustedHashMatch || result.RuleContent != "danger" || called != 0 {
 		t.Fatalf("trusted result=%#v called=%d", result, called)
 	}
 }

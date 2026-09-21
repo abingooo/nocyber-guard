@@ -11,6 +11,7 @@ const error = ref('')
 const selected = ref<AuditEvent | null>(null)
 const evidence = ref<EventEvidence | null>(null)
 const evidenceLoading = ref(false)
+const ruleContent = ref('')
 const addingRule = ref<'trusted' | 'risk' | null>(null)
 const ruleError = ref('')
 const ruleNotice = ref('')
@@ -58,11 +59,17 @@ function changePage(next: number) {
 async function openEvent(event: AuditEvent) {
   selected.value = event
   evidence.value = null
+  ruleContent.value = ''
   ruleError.value = ''
   ruleNotice.value = ''
   if (event.evidence_available) {
     evidenceLoading.value = true
-    try { evidence.value = await api.getEventEvidence(event.id) } catch { evidence.value = null }
+    try {
+      evidence.value = await api.getEventEvidence(event.id)
+      if (evidence.value && !evidence.value.partial && evidence.value.content) {
+        ruleContent.value = evidence.value.content
+      }
+    } catch { evidence.value = null }
     finally { evidenceLoading.value = false }
   }
 }
@@ -77,6 +84,10 @@ async function copy(value: string, label: string) {
 }
 async function addRule(kind: 'trusted' | 'risk') {
   if (!selected.value?.prompt_sha256) return
+  if (!ruleContent.value) {
+    ruleError.value = '请先填写该 Hash 对应的完整原文'
+    return
+  }
   ruleError.value = ''
   ruleNotice.value = ''
   addingRule.value = kind
@@ -84,6 +95,7 @@ async function addRule(kind: 'trusted' | 'risk') {
     await api.createHash(kind, {
       sha256: selected.value.prompt_sha256,
       label: `审核事件 #${selected.value.id}`,
+      content: ruleContent.value,
     })
     ruleNotice.value = kind === 'risk' ? '已加入风险库' : '已加入可信库'
     toast.show(ruleNotice.value)
@@ -173,9 +185,16 @@ onMounted(load)
           <ShieldAlert v-if="selected.outcome !== 'allow'" :size="21" /><ShieldCheck v-else :size="21" />
           <div><strong>{{ outcomeLabel(selected.outcome) }}</strong><span>{{ selected.reason || '审核完成' }}</span></div>
         </div>
-        <div v-if="selected.prompt_sha256" class="rule-actions">
-          <button class="secondary-button" :disabled="addingRule !== null" @click="addRule('trusted')"><ShieldCheck :size="16" />{{ addingRule === 'trusted' ? '添加中…' : '加入可信库' }}</button>
-          <button class="secondary-button" :disabled="addingRule !== null" @click="addRule('risk')"><ShieldAlert :size="16" />{{ addingRule === 'risk' ? '添加中…' : '加入风险库' }}</button>
+        <div v-if="selected.prompt_sha256" class="event-rule-editor">
+          <label class="field-label rule-content-field" for="event-rule-content">
+            规则完整原文
+            <span class="field-hint">完整阻断证据会自动填入；否则请粘贴原文，保存时将校验 SHA-256</span>
+            <textarea id="event-rule-content" v-model="ruleContent" rows="6" placeholder="填写与此 Prompt Hash 完全对应的原文" />
+          </label>
+          <div class="rule-actions">
+            <button class="secondary-button" :disabled="addingRule !== null || evidenceLoading || !ruleContent" @click="addRule('trusted')"><ShieldCheck :size="16" />{{ addingRule === 'trusted' ? '添加中…' : '加入可信库' }}</button>
+            <button class="secondary-button" :disabled="addingRule !== null || evidenceLoading || !ruleContent" @click="addRule('risk')"><ShieldAlert :size="16" />{{ addingRule === 'risk' ? '添加中…' : '加入风险库' }}</button>
+          </div>
         </div>
         <div v-if="addingRule || ruleError || ruleNotice" class="rule-feedback" :class="{ failed: ruleError }" role="status" aria-live="polite">
           <span v-if="addingRule" class="loader" aria-hidden="true" />

@@ -29,8 +29,9 @@ import (
 var hashPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
 const (
-	minAuditBodyBytes = 1 << 20
-	maxAuditBodyBytes = 64 << 20
+	minAuditBodyBytes   = 1 << 20
+	maxAuditBodyBytes   = 64 << 20
+	maxRuleContentBytes = maxAuditBodyBytes
 )
 
 type Store struct {
@@ -92,14 +93,14 @@ CREATE TABLE IF NOT EXISTS ai_endpoints(id INTEGER PRIMARY KEY CHECK(id=1), base
 CREATE TABLE IF NOT EXISTS ai_nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, slot TEXT NOT NULL UNIQUE, name TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL, model TEXT NOT NULL, api_key BLOB NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 15000, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ai_nodes_enabled_idx ON ai_nodes(enabled,slot);
 CREATE TABLE IF NOT EXISTS client_profiles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 100, matchers_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL, model TEXT NOT NULL, user_agent TEXT NOT NULL, profile_key TEXT NOT NULL, decision TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'audit', outcome TEXT NOT NULL DEFAULT 'allow', reason TEXT NOT NULL, field_name TEXT NOT NULL, sha256 TEXT NOT NULL, prompt_bytes INTEGER NOT NULL, prompt_runes INTEGER NOT NULL, ai_sampled INTEGER NOT NULL, ai_result TEXT NOT NULL DEFAULT '', ai_confidence REAL NOT NULL DEFAULT 0, ai_reason TEXT NOT NULL DEFAULT '', ai_category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL, audit_latency_ms INTEGER NOT NULL DEFAULT 0, ai_latency_ms INTEGER NOT NULL DEFAULT 0, upstream_accessed INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS audit_events_reason_idx ON audit_events(reason);
 CREATE TABLE IF NOT EXISTS blocked_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL REFERENCES audit_events(id) ON DELETE CASCADE, field_name TEXT NOT NULL, content TEXT NOT NULL, partial INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', content_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS review_jobs_created_idx ON review_jobs(created_at DESC);
 CREATE TABLE IF NOT EXISTS review_votes(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, node_slot TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(job_id,node_slot));
 CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, kind TEXT NOT NULL, vote_summary TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_id,kind));
@@ -120,9 +121,15 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 		{"next_attempt_at", "TEXT NOT NULL DEFAULT ''"},
 		{"last_error", "TEXT NOT NULL DEFAULT ''"},
 		{"sample_ciphertext", "BLOB NOT NULL DEFAULT ''"},
+		{"content_ciphertext", "BLOB NOT NULL DEFAULT ''"},
 		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := ensureColumn(ctx, s.db, "review_jobs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, table := range []string{"trusted_hashes", "risk_hashes"} {
+		if err := ensureColumn(ctx, s.db, table, "content", "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
@@ -147,8 +154,109 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 	if err := s.migrateEventContractV2(ctx, now); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", now)
-	return err
+	if _, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", now); err != nil {
+		return err
+	}
+	return s.migrateRulePlaintextV4(ctx, now)
+}
+
+func (s *Store) migrateRulePlaintextV4(ctx context.Context, appliedAt string) error {
+	var exists int
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM schema_migrations WHERE version=4").Scan(&exists)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	type candidate struct {
+		kind    string
+		sha256  string
+		content string
+	}
+	candidates := make(map[string]candidate)
+	addCandidate := func(kind, hash, content string) {
+		if content == "" || validateHashContent(hash, content) != nil {
+			return
+		}
+		key := kind + ":" + strings.ToLower(hash)
+		if _, found := candidates[key]; !found {
+			candidates[key] = candidate{kind: kind, sha256: strings.ToLower(hash), content: content}
+		}
+	}
+
+	// Complete blocking evidence contains the exact selected field. Partial
+	// evidence is never considered because its digest cannot equal the rule.
+	rows, err := s.db.QueryContext(ctx, `SELECT r.sha256,b.content
+		FROM risk_hashes r
+		JOIN audit_events e ON e.sha256=r.sha256
+		JOIN blocked_evidence b ON b.event_id=e.id
+		WHERE r.content='' AND b.partial=0
+		ORDER BY b.id DESC`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var hash, content string
+		if err := rows.Scan(&hash, &content); err != nil {
+			rows.Close()
+			return err
+		}
+		addCandidate("risk", hash, content)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	// Before v0.4, an unsampled async-review payload could still be the exact
+	// field. Decrypt it and accept it only when its digest proves that fact.
+	for _, kind := range []string{"trusted", "risk"} {
+		table := kind + "_hashes"
+		rows, err = s.db.QueryContext(ctx, `SELECT r.sha256,j.sample_ciphertext
+			FROM `+table+` r
+			JOIN rule_promotions p ON p.sha256=r.sha256 AND p.kind=?
+			JOIN review_jobs j ON j.id=p.job_id
+			WHERE r.content='' AND j.sampled=0 AND length(j.sample_ciphertext)>0
+			ORDER BY j.id DESC`, kind)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var hash string
+			var encrypted []byte
+			if err := rows.Scan(&hash, &encrypted); err != nil {
+				rows.Close()
+				return err
+			}
+			plain, decryptErr := s.decrypt(encrypted)
+			if decryptErr == nil {
+				addCandidate(kind, hash, string(plain))
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range candidates {
+		table := "trusted_hashes"
+		if item.kind == "risk" {
+			table = "risk_hashes"
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE "+table+" SET content=? WHERE sha256=? AND content=''", item.content, item.sha256); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)", appliedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateEventContractV2(ctx context.Context, appliedAt string) error {
@@ -325,6 +433,7 @@ type HashEntry struct {
 	ID        int64  `json:"id"`
 	SHA256    string `json:"sha256"`
 	Label     string `json:"label"`
+	Content   string `json:"content"`
 	Source    string `json:"source"`
 	Enabled   bool   `json:"enabled"`
 	CreatedAt string `json:"created_at"`
@@ -333,6 +442,24 @@ type HashEntry struct {
 func validateHash(h string) error {
 	if !hashPattern.MatchString(h) {
 		return errors.New("sha256 must be 64 hexadecimal characters")
+	}
+	return nil
+}
+
+func hashPlaintext(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(digest[:])
+}
+
+func validateHashContent(h, content string) error {
+	if content == "" {
+		return nil
+	}
+	if !utf8.ValidString(content) || len([]byte(content)) > maxRuleContentBytes {
+		return fmt.Errorf("hash content must be valid UTF-8 and no longer than %d bytes", maxRuleContentBytes)
+	}
+	if hashPlaintext(content) != strings.ToLower(h) {
+		return errors.New("sha256 does not match the supplied content")
 	}
 	return nil
 }
@@ -364,7 +491,7 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	if kind == "risk" {
 		table = "risk_hashes"
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,sha256,label,source,enabled,created_at FROM "+table+" ORDER BY id DESC")
+	rows, err := s.db.QueryContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" ORDER BY id DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +500,7 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	for rows.Next() {
 		var x HashEntry
 		var en int
-		if err = rows.Scan(&x.ID, &x.SHA256, &x.Label, &x.Source, &en, &x.CreatedAt); err != nil {
+		if err = rows.Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &en, &x.CreatedAt); err != nil {
 			return nil, err
 		}
 		x.Enabled = en != 0
@@ -382,14 +509,28 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	return out, rows.Err()
 }
 func (s *Store) AddHash(ctx context.Context, kind, h, label string) (HashEntry, error) {
-	return s.AddHashSource(ctx, kind, h, label, "manual")
+	return s.AddHashSourceWithContent(ctx, kind, h, label, "", "manual")
 }
 
 func (s *Store) AddHashSource(ctx context.Context, kind, h, label, source string) (HashEntry, error) {
+	return s.AddHashSourceWithContent(ctx, kind, h, label, "", source)
+}
+
+func (s *Store) AddHashWithContent(ctx context.Context, kind, h, label, content string) (HashEntry, error) {
+	return s.AddHashSourceWithContent(ctx, kind, h, label, content, "manual")
+}
+
+func (s *Store) AddHashSourceWithContent(ctx context.Context, kind, h, label, content, source string) (HashEntry, error) {
 	if kind != "trusted" && kind != "risk" {
 		return HashEntry{}, errors.New("invalid hash kind")
 	}
+	if strings.TrimSpace(h) == "" && content != "" {
+		h = hashPlaintext(content)
+	}
 	if err := validateHash(h); err != nil {
+		return HashEntry{}, err
+	}
+	if err := validateHashContent(h, content); err != nil {
 		return HashEntry{}, err
 	}
 	label = strings.TrimSpace(label)
@@ -404,18 +545,22 @@ func (s *Store) AddHashSource(ctx context.Context, kind, h, label, source string
 		table = "risk_hashes"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,source,created_at) VALUES(?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,source=excluded.source,enabled=1", strings.ToLower(h), label, source, now)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,created_at) VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,enabled=1", strings.ToLower(h), label, content, source, now)
 	if err != nil {
 		return HashEntry{}, err
 	}
 	var x HashEntry
 	var en int
-	err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,source,enabled,created_at FROM "+table+" WHERE sha256=?", strings.ToLower(h)).Scan(&x.ID, &x.SHA256, &x.Label, &x.Source, &en, &x.CreatedAt)
+	err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" WHERE sha256=?", strings.ToLower(h)).Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &en, &x.CreatedAt)
 	x.Enabled = en != 0
 	return x, err
 }
 
 func (s *Store) UpdateHash(ctx context.Context, kind string, id int64, label string, enabled bool) (HashEntry, error) {
+	return s.UpdateHashWithContent(ctx, kind, id, label, enabled, nil)
+}
+
+func (s *Store) UpdateHashWithContent(ctx context.Context, kind string, id int64, label string, enabled bool, content *string) (HashEntry, error) {
 	if kind != "trusted" && kind != "risk" {
 		return HashEntry{}, errors.New("invalid hash kind")
 	}
@@ -431,7 +576,25 @@ func (s *Store) UpdateHash(ctx context.Context, kind string, id int64, label str
 	if enabled {
 		en = 1
 	}
-	result, err := s.db.ExecContext(ctx, "UPDATE "+table+" SET label=?,enabled=? WHERE id=?", label, en, id)
+	if content != nil {
+		if *content == "" {
+			return HashEntry{}, errors.New("hash content cannot be empty")
+		}
+		var h string
+		if err := s.db.QueryRowContext(ctx, "SELECT sha256 FROM "+table+" WHERE id=?", id).Scan(&h); err != nil {
+			return HashEntry{}, err
+		}
+		if err := validateHashContent(h, *content); err != nil {
+			return HashEntry{}, err
+		}
+	}
+	query := "UPDATE " + table + " SET label=?,enabled=? WHERE id=?"
+	args := []any{label, en, id}
+	if content != nil {
+		query = "UPDATE " + table + " SET label=?,enabled=?,content=? WHERE id=?"
+		args = []any{label, en, *content, id}
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return HashEntry{}, err
 	}
@@ -439,11 +602,34 @@ func (s *Store) UpdateHash(ctx context.Context, kind string, id int64, label str
 		return HashEntry{}, sql.ErrNoRows
 	}
 	var item HashEntry
-	if err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,source,enabled,created_at FROM "+table+" WHERE id=?", id).Scan(&item.ID, &item.SHA256, &item.Label, &item.Source, &en, &item.CreatedAt); err != nil {
+	if err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" WHERE id=?", id).Scan(&item.ID, &item.SHA256, &item.Label, &item.Content, &item.Source, &en, &item.CreatedAt); err != nil {
 		return HashEntry{}, err
 	}
 	item.Enabled = en != 0
 	return item, nil
+}
+
+// StoreHashContent fills plaintext for a legacy hash-only rule on first use.
+// Existing plaintext is never overwritten by request traffic.
+func (s *Store) StoreHashContent(ctx context.Context, kind, h, content string) error {
+	if kind != "trusted" && kind != "risk" {
+		return errors.New("invalid hash kind")
+	}
+	if err := validateHash(h); err != nil {
+		return err
+	}
+	if content == "" {
+		return errors.New("hash content cannot be empty")
+	}
+	if err := validateHashContent(h, content); err != nil {
+		return err
+	}
+	table := "trusted_hashes"
+	if kind == "risk" {
+		table = "risk_hashes"
+	}
+	_, err := s.db.ExecContext(ctx, "UPDATE "+table+" SET content=? WHERE sha256=? AND content=''", content, strings.ToLower(h))
+	return err
 }
 
 func (s *Store) DeleteHash(ctx context.Context, kind string, id int64) error {
@@ -915,7 +1101,7 @@ type RulePromotion struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model, content string, sampled bool) (ReviewJob, bool, error) {
+func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model, reviewContent, ruleContent string, sampled bool) (ReviewJob, bool, error) {
 	if err := validateHash(sha256Value); err != nil {
 		return ReviewJob{}, false, err
 	}
@@ -928,21 +1114,38 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 		sampledInt = 1
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	var encrypted []byte
+	sampleCiphertext := []byte{}
+	contentCiphertext := []byte{}
 	var err error
-	if content != "" {
-		encrypted, err = s.encrypt([]byte(content))
+	if reviewContent != "" {
+		sampleCiphertext, err = s.encrypt([]byte(reviewContent))
 		if err != nil {
 			return ReviewJob{}, false, err
 		}
 	}
-	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,sample_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, encrypted, now, now)
+	if ruleContent != "" {
+		if err := validateHashContent(sha256Value, ruleContent); err != nil {
+			return ReviewJob{}, false, err
+		}
+		contentCiphertext, err = s.encrypt([]byte(ruleContent))
+		if err != nil {
+			return ReviewJob{}, false, err
+		}
+	}
+	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,sample_ciphertext,content_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?,?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, sampleCiphertext, contentCiphertext, now, now)
 	if err != nil {
 		return ReviewJob{}, false, err
 	}
 	created := false
 	if n, _ := res.RowsAffected(); n > 0 {
 		created = true
+	} else if len(contentCiphertext) > 0 || len(sampleCiphertext) > 0 {
+		if _, err = s.db.ExecContext(ctx, `UPDATE review_jobs SET
+			sample_ciphertext=CASE WHEN length(sample_ciphertext)=0 THEN ? ELSE sample_ciphertext END,
+			content_ciphertext=CASE WHEN length(content_ciphertext)=0 THEN ? ELSE content_ciphertext END,
+			updated_at=? WHERE job_key=?`, sampleCiphertext, contentCiphertext, now, jobKey); err != nil {
+			return ReviewJob{}, false, err
+		}
 	}
 	var j ReviewJob
 	var sampledDB int
@@ -954,6 +1157,21 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 func (s *Store) LoadReviewJobSample(ctx context.Context, id int64) (string, error) {
 	var encrypted []byte
 	if err := s.db.QueryRowContext(ctx, "SELECT sample_ciphertext FROM review_jobs WHERE id=?", id).Scan(&encrypted); err != nil {
+		return "", err
+	}
+	if len(encrypted) == 0 {
+		return "", nil
+	}
+	plain, err := s.decrypt(encrypted)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func (s *Store) LoadReviewJobContent(ctx context.Context, id int64) (string, error) {
+	var encrypted []byte
+	if err := s.db.QueryRowContext(ctx, "SELECT content_ciphertext FROM review_jobs WHERE id=?", id).Scan(&encrypted); err != nil {
 		return "", err
 	}
 	if len(encrypted) == 0 {
@@ -1045,11 +1263,17 @@ func (s *Store) CompleteReviewJob(ctx context.Context, id int64, status, promoti
 	return err
 }
 
-func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind, summary string) error {
+func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind, content, summary string) error {
 	if kind != "trusted" && kind != "risk" {
 		return errors.New("invalid promotion kind")
 	}
 	if err := validateHash(sha256Value); err != nil {
+		return err
+	}
+	if content == "" {
+		return errors.New("rule content is required for promotion")
+	}
+	if err := validateHashContent(sha256Value, content); err != nil {
 		return err
 	}
 	table := "trusted_hashes"
@@ -1062,10 +1286,13 @@ func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind,
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,source,created_at) VALUES(?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,source=excluded.source,enabled=1", strings.ToLower(sha256Value), "automatic async quorum", "async_quorum", now); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,created_at) VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,enabled=1", strings.ToLower(sha256Value), "automatic async quorum", content, "async_quorum", now); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO rule_promotions(job_id,sha256,kind,vote_summary,created_at) VALUES(?,?,?,?,?)", jobID, strings.ToLower(sha256Value), kind, summary, now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE review_jobs SET content_ciphertext='' WHERE id=?", jobID); err != nil {
 		return err
 	}
 	return tx.Commit()
