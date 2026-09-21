@@ -855,7 +855,11 @@ func (s *Store) SaveAINode(ctx context.Context, n AINode) error {
 	if err := ValidateAINode(n); err != nil {
 		return err
 	}
-	var encrypted []byte
+	// Keep an empty API key as a non-NULL zero-length blob. ai_nodes.api_key is
+	// NOT NULL, and SQLite checks that constraint before applying the conflict
+	// update below. Passing a nil []byte would therefore fail before the
+	// existing encrypted key can be preserved.
+	encrypted := []byte{}
 	var err error
 	if n.APIKey != "" {
 		encrypted, err = s.encrypt([]byte(n.APIKey))

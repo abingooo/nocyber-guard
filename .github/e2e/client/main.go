@@ -205,7 +205,7 @@ func (s *suite) checkAdminSettings() error {
 	}
 	response, body, _, err = s.adminJSON(http.MethodPut, "/api/v1/ai-nodes", mustJSON(map[string]any{"nodes": nodes}))
 	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(body, []byte("e2e-async-")) {
-		return fmt.Errorf("asynchronous AI key-preserving save failed: status=%d err=%v", responseStatus(response), err)
+		return fmt.Errorf("asynchronous AI key-preserving save failed: status=%d err=%v body=%s", responseStatus(response), err, body)
 	}
 	response, body, _, err = s.adminJSON(http.MethodPost, "/api/v1/ai-nodes/async_1/test", mustJSON(nodes[0]))
 	if err != nil || response.StatusCode != http.StatusOK || !jsonOK(body) {

@@ -94,6 +94,26 @@ func TestAsyncNodesAcceptSecretsButNeverReturnThem(t *testing.T) {
 	if err != nil || len(nodes) != 3 || nodes[0].APIKey == "" {
 		t.Fatalf("stored async nodes=%+v err=%v", nodes, err)
 	}
+	wantKeys := make(map[string]string, len(nodes))
+	for _, node := range nodes {
+		wantKeys[node.Slot] = node.APIKey
+	}
+	for _, node := range input["nodes"].([]map[string]any) {
+		node["api_key"] = ""
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/ai-nodes", input)
+	if rr.Code != http.StatusOK || bytes.Contains(rr.Body.Bytes(), []byte("secret-")) {
+		t.Fatalf("async node key-preserving save status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	nodes, err = store.ListAINodes(context.Background())
+	if err != nil || len(nodes) != 3 {
+		t.Fatalf("stored async nodes after blank-key save=%+v err=%v", nodes, err)
+	}
+	for _, node := range nodes {
+		if node.APIKey != wantKeys[node.Slot] {
+			t.Fatalf("async node %s API key changed after blank-key save", node.Slot)
+		}
+	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/ai-nodes", nil)
 	if rr.Code != http.StatusOK || bytes.Contains(rr.Body.Bytes(), []byte("secret-")) {
 		t.Fatalf("async node GET status=%d body=%q", rr.Code, rr.Body.String())
