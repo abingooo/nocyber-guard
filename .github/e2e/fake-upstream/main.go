@@ -99,6 +99,10 @@ func serveAIReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Header.Get("Authorization") == "" {
+		echo(w, r)
+		return
+	}
 	allowed := map[string]bool{
 		"Bearer e2e-sync-secret":  true,
 		"Bearer e2e-draft-secret": true,
