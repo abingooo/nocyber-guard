@@ -41,6 +41,11 @@ function shortHash(value: string) {
   return `${value.slice(0, 14)}…${value.slice(-10)}`
 }
 
+function keyTrace(entry: HashEntry) {
+  if (!entry.api_key_fingerprint) return '未关联'
+  return `${entry.api_key_hint || '已识别'} · ${entry.api_key_fingerprint.slice(0, 12)}`
+}
+
 function formatTime(value: string) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('zh-CN')
@@ -229,6 +234,7 @@ onMounted(load)
               <th>SHA-256</th>
               <th>原文</th>
               <th>来源</th>
+              <th>关联 Key</th>
               <th>状态</th>
               <th>创建时间</th>
               <th aria-label="操作" />
@@ -250,6 +256,7 @@ onMounted(load)
                 </button>
               </td>
               <td>{{ entry.source || '管理员添加' }}</td>
+              <td><span class="key-trace">{{ keyTrace(entry) }}</span><small v-if="entry.api_key_seen_at" class="table-sub">{{ formatTime(entry.api_key_seen_at) }}</small></td>
               <td>
                 <button
                   type="button"
@@ -315,6 +322,11 @@ onMounted(load)
         <div class="rule-content-meta">
           <code>{{ selected.sha256 }}</code>
           <button class="text-button" @click="copyText(selected.sha256, 'Hash 已复制')"><Copy :size="14" />复制 Hash</button>
+        </div>
+        <div class="rule-key-meta">
+          <span>来源 Key</span>
+          <strong>{{ keyTrace(selected) }}</strong>
+          <button v-if="selected.api_key_fingerprint" class="text-button" @click="copyText(selected.api_key_fingerprint, 'Key 指纹已复制')"><Copy :size="14" />复制指纹</button>
         </div>
         <div v-if="selected.content" class="evidence-box rule-content-preview">
           <div class="evidence-meta"><span>完整原文</span><span>{{ selected.content.length }} 字符</span></div>

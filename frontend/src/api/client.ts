@@ -149,7 +149,7 @@ export const api = {
     request<EventEvidence>(`/events/${encodeURIComponent(id)}/evidence`),
 
   listHashes: (kind: 'trusted' | 'risk') => request<HashEntry[]>(`/${kind}-hashes`),
-  createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label' | 'content'>) =>
+  createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label' | 'content'> & Partial<Pick<HashEntry, 'api_key_fingerprint' | 'api_key_hint'>>) =>
     request<HashEntry>(`/${kind}-hashes`, { method: 'POST', body: JSON.stringify(body) }),
   updateHash: (kind: 'trusted' | 'risk', id: string | number, body: Pick<HashEntry, 'label' | 'enabled'> & { content?: string }) =>
     request<HashEntry>(`/${kind}-hashes/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),

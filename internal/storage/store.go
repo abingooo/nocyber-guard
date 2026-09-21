@@ -26,7 +26,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var hashPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+var (
+	hashPattern       = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+	apiKeyHintPattern = regexp.MustCompile(`^(?:sk[-_])?…[A-Za-z0-9_-]{4}$`)
+)
 
 const (
 	minAuditBodyBytes   = 1 << 20
@@ -93,14 +96,14 @@ CREATE TABLE IF NOT EXISTS ai_endpoints(id INTEGER PRIMARY KEY CHECK(id=1), base
 CREATE TABLE IF NOT EXISTS ai_nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, slot TEXT NOT NULL UNIQUE, name TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL, model TEXT NOT NULL, api_key BLOB NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 15000, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ai_nodes_enabled_idx ON ai_nodes(enabled,slot);
 CREATE TABLE IF NOT EXISTS client_profiles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 100, matchers_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL, model TEXT NOT NULL, user_agent TEXT NOT NULL, profile_key TEXT NOT NULL, decision TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'audit', outcome TEXT NOT NULL DEFAULT 'allow', reason TEXT NOT NULL, field_name TEXT NOT NULL, sha256 TEXT NOT NULL, prompt_bytes INTEGER NOT NULL, prompt_runes INTEGER NOT NULL, ai_sampled INTEGER NOT NULL, ai_result TEXT NOT NULL DEFAULT '', ai_confidence REAL NOT NULL DEFAULT 0, ai_reason TEXT NOT NULL DEFAULT '', ai_category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL, audit_latency_ms INTEGER NOT NULL DEFAULT 0, ai_latency_ms INTEGER NOT NULL DEFAULT 0, upstream_accessed INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS trusted_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', api_key_seen_at TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', api_key_seen_at TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL, model TEXT NOT NULL, user_agent TEXT NOT NULL, profile_key TEXT NOT NULL, api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', decision TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'audit', outcome TEXT NOT NULL DEFAULT 'allow', reason TEXT NOT NULL, field_name TEXT NOT NULL, sha256 TEXT NOT NULL, prompt_bytes INTEGER NOT NULL, prompt_runes INTEGER NOT NULL, ai_sampled INTEGER NOT NULL, ai_result TEXT NOT NULL DEFAULT '', ai_confidence REAL NOT NULL DEFAULT 0, ai_reason TEXT NOT NULL DEFAULT '', ai_category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL, audit_latency_ms INTEGER NOT NULL DEFAULT 0, ai_latency_ms INTEGER NOT NULL DEFAULT 0, upstream_accessed INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS audit_events_reason_idx ON audit_events(reason);
 CREATE TABLE IF NOT EXISTS blocked_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL REFERENCES audit_events(id) ON DELETE CASCADE, field_name TEXT NOT NULL, content TEXT NOT NULL, partial INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', content_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', content_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS review_jobs_created_idx ON review_jobs(created_at DESC);
 CREATE TABLE IF NOT EXISTS review_votes(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, node_slot TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(job_id,node_slot));
 CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, kind TEXT NOT NULL, vote_summary TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_id,kind));
@@ -132,6 +135,15 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 		if err := ensureColumn(ctx, s.db, table, "content", "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
+		for _, column := range []struct{ name, definition string }{
+			{"api_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+			{"api_key_hint", "TEXT NOT NULL DEFAULT ''"},
+			{"api_key_seen_at", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			if err := ensureColumn(ctx, s.db, table, column.name, column.definition); err != nil {
+				return err
+			}
+		}
 	}
 	for _, column := range []struct {
 		name       string
@@ -142,6 +154,8 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 		{"audit_latency_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"ai_latency_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"upstream_accessed", "INTEGER NOT NULL DEFAULT 1"},
+		{"api_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+		{"api_key_hint", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := ensureColumn(ctx, s.db, "audit_events", column.name, column.definition); err != nil {
 			return err
@@ -157,7 +171,19 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 	if _, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", now); err != nil {
 		return err
 	}
-	return s.migrateRulePlaintextV4(ctx, now)
+	if err := s.migrateRulePlaintextV4(ctx, now); err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"api_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+		{"api_key_hint", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(ctx, s.db, "review_jobs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", now)
+	return err
 }
 
 func (s *Store) migrateRulePlaintextV4(ctx context.Context, appliedAt string) error {
@@ -430,13 +456,16 @@ func ValidateConfig(c Config) error {
 }
 
 type HashEntry struct {
-	ID        int64  `json:"id"`
-	SHA256    string `json:"sha256"`
-	Label     string `json:"label"`
-	Content   string `json:"content"`
-	Source    string `json:"source"`
-	Enabled   bool   `json:"enabled"`
-	CreatedAt string `json:"created_at"`
+	ID                int64  `json:"id"`
+	SHA256            string `json:"sha256"`
+	Label             string `json:"label"`
+	Content           string `json:"content"`
+	Source            string `json:"source"`
+	APIKeyFingerprint string `json:"api_key_fingerprint"`
+	APIKeyHint        string `json:"api_key_hint"`
+	APIKeySeenAt      string `json:"api_key_seen_at"`
+	Enabled           bool   `json:"enabled"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func validateHash(h string) error {
@@ -462,6 +491,24 @@ func validateHashContent(h, content string) error {
 		return errors.New("sha256 does not match the supplied content")
 	}
 	return nil
+}
+
+func validateAPIKeyTrace(fingerprint, hint string) (string, string, error) {
+	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
+	hint = strings.TrimSpace(hint)
+	if fingerprint == "" {
+		if hint != "" {
+			return "", "", errors.New("api key hint requires a fingerprint")
+		}
+		return "", "", nil
+	}
+	if !hashPattern.MatchString(fingerprint) {
+		return "", "", errors.New("api key fingerprint must be 64 hexadecimal characters")
+	}
+	if hint != "" && hint != "••••" && !apiKeyHintPattern.MatchString(hint) {
+		return "", "", errors.New("api key hint is invalid")
+	}
+	return fingerprint, hint, nil
 }
 func (s *Store) LookupHash(ctx context.Context, h string) (audit.HashMatch, bool, error) {
 	var m audit.HashMatch
@@ -491,7 +538,7 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	if kind == "risk" {
 		table = "risk_hashes"
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" ORDER BY id DESC")
+	rows, err := s.db.QueryContext(ctx, "SELECT id,sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" ORDER BY id DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +547,7 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 	for rows.Next() {
 		var x HashEntry
 		var en int
-		if err = rows.Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &en, &x.CreatedAt); err != nil {
+		if err = rows.Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &x.APIKeyFingerprint, &x.APIKeyHint, &x.APIKeySeenAt, &en, &x.CreatedAt); err != nil {
 			return nil, err
 		}
 		x.Enabled = en != 0
@@ -521,6 +568,10 @@ func (s *Store) AddHashWithContent(ctx context.Context, kind, h, label, content 
 }
 
 func (s *Store) AddHashSourceWithContent(ctx context.Context, kind, h, label, content, source string) (HashEntry, error) {
+	return s.AddHashSourceWithTrace(ctx, kind, h, label, content, source, "", "")
+}
+
+func (s *Store) AddHashSourceWithTrace(ctx context.Context, kind, h, label, content, source, apiKeyFingerprint, apiKeyHint string) (HashEntry, error) {
 	if kind != "trusted" && kind != "risk" {
 		return HashEntry{}, errors.New("invalid hash kind")
 	}
@@ -540,18 +591,26 @@ func (s *Store) AddHashSourceWithContent(ctx context.Context, kind, h, label, co
 	if source == "" || len(source) > 64 || !utf8.ValidString(source) {
 		return HashEntry{}, errors.New("hash source is invalid")
 	}
+	apiKeyFingerprint, apiKeyHint, err := validateAPIKeyTrace(apiKeyFingerprint, apiKeyHint)
+	if err != nil {
+		return HashEntry{}, err
+	}
 	table := "trusted_hashes"
 	if kind == "risk" {
 		table = "risk_hashes"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,created_at) VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,enabled=1", strings.ToLower(h), label, content, source, now)
+	seenAt := ""
+	if apiKeyFingerprint != "" {
+		seenAt = now
+	}
+	_, err = s.db.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,api_key_fingerprint=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_fingerprint ELSE "+table+".api_key_fingerprint END,api_key_hint=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_hint ELSE "+table+".api_key_hint END,api_key_seen_at=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_seen_at ELSE "+table+".api_key_seen_at END,enabled=1", strings.ToLower(h), label, content, source, apiKeyFingerprint, apiKeyHint, seenAt, now)
 	if err != nil {
 		return HashEntry{}, err
 	}
 	var x HashEntry
 	var en int
-	err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" WHERE sha256=?", strings.ToLower(h)).Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &en, &x.CreatedAt)
+	err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" WHERE sha256=?", strings.ToLower(h)).Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &x.APIKeyFingerprint, &x.APIKeyHint, &x.APIKeySeenAt, &en, &x.CreatedAt)
 	x.Enabled = en != 0
 	return x, err
 }
@@ -602,7 +661,7 @@ func (s *Store) UpdateHashWithContent(ctx context.Context, kind string, id int64
 		return HashEntry{}, sql.ErrNoRows
 	}
 	var item HashEntry
-	if err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,enabled,created_at FROM "+table+" WHERE id=?", id).Scan(&item.ID, &item.SHA256, &item.Label, &item.Content, &item.Source, &en, &item.CreatedAt); err != nil {
+	if err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" WHERE id=?", id).Scan(&item.ID, &item.SHA256, &item.Label, &item.Content, &item.Source, &item.APIKeyFingerprint, &item.APIKeyHint, &item.APIKeySeenAt, &en, &item.CreatedAt); err != nil {
 		return HashEntry{}, err
 	}
 	item.Enabled = en != 0
@@ -612,6 +671,12 @@ func (s *Store) UpdateHashWithContent(ctx context.Context, kind string, id int64
 // StoreHashContent fills plaintext for a legacy hash-only rule on first use.
 // Existing plaintext is never overwritten by request traffic.
 func (s *Store) StoreHashContent(ctx context.Context, kind, h, content string) error {
+	return s.StoreHashContext(ctx, kind, h, content, "", "")
+}
+
+// StoreHashContext fills missing plaintext and the first observed request-key
+// trace for a rule. Existing values are never overwritten by request traffic.
+func (s *Store) StoreHashContext(ctx context.Context, kind, h, content, apiKeyFingerprint, apiKeyHint string) error {
 	if kind != "trusted" && kind != "risk" {
 		return errors.New("invalid hash kind")
 	}
@@ -624,11 +689,19 @@ func (s *Store) StoreHashContent(ctx context.Context, kind, h, content string) e
 	if err := validateHashContent(h, content); err != nil {
 		return err
 	}
+	apiKeyFingerprint, apiKeyHint, err := validateAPIKeyTrace(apiKeyFingerprint, apiKeyHint)
+	if err != nil {
+		return err
+	}
 	table := "trusted_hashes"
 	if kind == "risk" {
 		table = "risk_hashes"
 	}
-	_, err := s.db.ExecContext(ctx, "UPDATE "+table+" SET content=? WHERE sha256=? AND content=''", content, strings.ToLower(h))
+	seenAt := ""
+	if apiKeyFingerprint != "" {
+		seenAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_, err = s.db.ExecContext(ctx, "UPDATE "+table+" SET content=CASE WHEN content='' THEN ? ELSE content END,api_key_fingerprint=CASE WHEN api_key_fingerprint='' THEN ? ELSE api_key_fingerprint END,api_key_hint=CASE WHEN api_key_fingerprint='' THEN ? ELSE api_key_hint END,api_key_seen_at=CASE WHEN api_key_fingerprint='' THEN ? ELSE api_key_seen_at END WHERE sha256=?", content, apiKeyFingerprint, apiKeyHint, seenAt, strings.ToLower(h))
 	return err
 }
 
@@ -688,6 +761,11 @@ func (s *Store) insertEvent(ctx context.Context, tx *sql.Tx, e audit.Event) (int
 	e.Model = safeEventText(e.Model, 256)
 	e.UserAgent = audit.SanitizeUserAgent(e.UserAgent)
 	e.ProfileKey = safeEventText(e.ProfileKey, 64)
+	var traceErr error
+	e.APIKeyFingerprint, e.APIKeyHint, traceErr = validateAPIKeyTrace(e.APIKeyFingerprint, e.APIKeyHint)
+	if traceErr != nil {
+		e.APIKeyFingerprint, e.APIKeyHint = "", ""
+	}
 	e.Decision = safeEventText(e.Decision, 16)
 	e.Field = safeEventText(e.Field, 64)
 	if !hashPattern.MatchString(e.SHA256) {
@@ -707,7 +785,7 @@ func (s *Store) insertEvent(ctx context.Context, tx *sql.Tx, e audit.Event) (int
 	if e.UpstreamAccessed {
 		upstreamAccessed = 1
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO audit_events(request_id,method,path,protocol,model,user_agent,profile_key,decision,action,outcome,reason,field_name,sha256,prompt_bytes,prompt_runes,ai_sampled,ai_result,ai_confidence,ai_reason,ai_category,latency_ms,audit_latency_ms,ai_latency_ms,upstream_accessed,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.RequestID, e.Method, e.Path, e.Protocol, e.Model, e.UserAgent, e.ProfileKey, e.Decision, string(e.Action), string(e.Outcome), string(e.Reason), e.Field, e.SHA256, e.PromptBytes, e.PromptRunes, e.AISampled, aiResult, aiConf, "", "", e.AuditLatency.Milliseconds(), e.AuditLatency.Milliseconds(), e.AILatency.Milliseconds(), upstreamAccessed, e.CreatedAt.Format(time.RFC3339Nano))
+	res, err := tx.ExecContext(ctx, `INSERT INTO audit_events(request_id,method,path,protocol,model,user_agent,profile_key,api_key_fingerprint,api_key_hint,decision,action,outcome,reason,field_name,sha256,prompt_bytes,prompt_runes,ai_sampled,ai_result,ai_confidence,ai_reason,ai_category,latency_ms,audit_latency_ms,ai_latency_ms,upstream_accessed,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.RequestID, e.Method, e.Path, e.Protocol, e.Model, e.UserAgent, e.ProfileKey, e.APIKeyFingerprint, e.APIKeyHint, e.Decision, string(e.Action), string(e.Outcome), string(e.Reason), e.Field, e.SHA256, e.PromptBytes, e.PromptRunes, e.AISampled, aiResult, aiConf, "", "", e.AuditLatency.Milliseconds(), e.AuditLatency.Milliseconds(), e.AILatency.Milliseconds(), upstreamAccessed, e.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -779,6 +857,8 @@ type Event struct {
 	ClientProfile     string  `json:"client_profile"`
 	UserAgent         string  `json:"user_agent"`
 	Model             string  `json:"model"`
+	APIKeyFingerprint string  `json:"api_key_fingerprint"`
+	APIKeyHint        string  `json:"api_key_hint"`
 	PromptSHA256      string  `json:"prompt_sha256"`
 	AIResult          string  `json:"ai_result"`
 	AIConfidence      float64 `json:"ai_confidence"`
@@ -822,9 +902,9 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 		args = append(args, filter.Decision)
 	}
 	if filter.Query != "" {
-		where += " AND (request_id LIKE ? OR reason LIKE ? OR sha256 LIKE ?)"
+		where += " AND (request_id LIKE ? OR reason LIKE ? OR sha256 LIKE ? OR api_key_fingerprint LIKE ? OR api_key_hint LIKE ?)"
 		q := "%" + filter.Query + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q, q)
 	}
 	if !filter.From.IsZero() {
 		where += " AND julianday(created_at) >= julianday(?)"
@@ -841,7 +921,7 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 	queryArgs := []any{time.Now().UTC().Format(time.RFC3339Nano)}
 	queryArgs = append(queryArgs, args...)
 	queryArgs = append(queryArgs, size, (page-1)*size)
-	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE "+where+" ORDER BY id DESC LIMIT ? OFFSET ?", queryArgs...)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE "+where+" ORDER BY id DESC LIMIT ? OFFSET ?", queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -849,7 +929,7 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 	out := []Event{}
 	for rows.Next() {
 		var e Event
-		if err = rows.Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable); err != nil {
+		if err = rows.Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable); err != nil {
 			return nil, 0, err
 		}
 		e.LatencyMS = e.AuditLatencyMS
@@ -859,7 +939,7 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 }
 func (s *Store) GetEvent(ctx context.Context, id int64) (Event, error) {
 	var e Event
-	err := s.db.QueryRowContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id).Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable)
+	err := s.db.QueryRowContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id).Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable)
 	e.LatencyMS = e.AuditLatencyMS
 	return e, err
 }
@@ -1064,19 +1144,21 @@ ON CONFLICT(slot) DO UPDATE SET name=excluded.name,base_url=excluded.base_url,mo
 }
 
 type ReviewJob struct {
-	ID            int64  `json:"id"`
-	JobKey        string `json:"job_key"`
-	SHA256        string `json:"sha256"`
-	FieldName     string `json:"field_name"`
-	Model         string `json:"model"`
-	Sampled       bool   `json:"sampled"`
-	Status        string `json:"status"`
-	Promotion     string `json:"promotion"`
-	Attempts      int    `json:"attempts"`
-	NextAttemptAt string `json:"next_attempt_at"`
-	LastError     string `json:"last_error,omitempty"`
-	CreatedAt     string `json:"created_at"`
-	CompletedAt   string `json:"completed_at"`
+	ID                int64  `json:"id"`
+	JobKey            string `json:"job_key"`
+	SHA256            string `json:"sha256"`
+	FieldName         string `json:"field_name"`
+	Model             string `json:"model"`
+	APIKeyFingerprint string `json:"api_key_fingerprint"`
+	APIKeyHint        string `json:"api_key_hint"`
+	Sampled           bool   `json:"sampled"`
+	Status            string `json:"status"`
+	Promotion         string `json:"promotion"`
+	Attempts          int    `json:"attempts"`
+	NextAttemptAt     string `json:"next_attempt_at"`
+	LastError         string `json:"last_error,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	CompletedAt       string `json:"completed_at"`
 }
 
 type ReviewVote struct {
@@ -1101,13 +1183,25 @@ type RulePromotion struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model, reviewContent, ruleContent string, sampled bool) (ReviewJob, bool, error) {
+func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldName, model, reviewContent, ruleContent string, sampled bool, keyTrace ...string) (ReviewJob, bool, error) {
 	if err := validateHash(sha256Value); err != nil {
 		return ReviewJob{}, false, err
 	}
 	jobKey = strings.TrimSpace(jobKey)
 	if jobKey == "" || len(jobKey) > 256 {
 		return ReviewJob{}, false, errors.New("review job key is invalid")
+	}
+	apiKeyFingerprint, apiKeyHint := "", ""
+	if len(keyTrace) > 0 {
+		apiKeyFingerprint = keyTrace[0]
+	}
+	if len(keyTrace) > 1 {
+		apiKeyHint = keyTrace[1]
+	}
+	var traceErr error
+	apiKeyFingerprint, apiKeyHint, traceErr = validateAPIKeyTrace(apiKeyFingerprint, apiKeyHint)
+	if traceErr != nil {
+		return ReviewJob{}, false, traceErr
 	}
 	sampledInt := 0
 	if sampled {
@@ -1132,7 +1226,7 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 			return ReviewJob{}, false, err
 		}
 	}
-	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,sampled,status,sample_ciphertext,content_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?,?)", jobKey, strings.ToLower(sha256Value), fieldName, model, sampledInt, sampleCiphertext, contentCiphertext, now, now)
+	res, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO review_jobs(job_key,sha256,field_name,model,api_key_fingerprint,api_key_hint,sampled,status,sample_ciphertext,content_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?)", jobKey, strings.ToLower(sha256Value), fieldName, model, apiKeyFingerprint, apiKeyHint, sampledInt, sampleCiphertext, contentCiphertext, now, now)
 	if err != nil {
 		return ReviewJob{}, false, err
 	}
@@ -1143,13 +1237,15 @@ func (s *Store) CreateReviewJob(ctx context.Context, jobKey, sha256Value, fieldN
 		if _, err = s.db.ExecContext(ctx, `UPDATE review_jobs SET
 			sample_ciphertext=CASE WHEN length(sample_ciphertext)=0 THEN ? ELSE sample_ciphertext END,
 			content_ciphertext=CASE WHEN length(content_ciphertext)=0 THEN ? ELSE content_ciphertext END,
-			updated_at=? WHERE job_key=?`, sampleCiphertext, contentCiphertext, now, jobKey); err != nil {
+			api_key_fingerprint=CASE WHEN api_key_fingerprint='' THEN ? ELSE api_key_fingerprint END,
+			api_key_hint=CASE WHEN api_key_fingerprint='' THEN ? ELSE api_key_hint END,
+			updated_at=? WHERE job_key=?`, sampleCiphertext, contentCiphertext, apiKeyFingerprint, apiKeyHint, now, jobKey); err != nil {
 			return ReviewJob{}, false, err
 		}
 	}
 	var j ReviewJob
 	var sampledDB int
-	err = s.db.QueryRowContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE job_key=?", jobKey).Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampledDB, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt)
+	err = s.db.QueryRowContext(ctx, "SELECT id,job_key,sha256,field_name,model,api_key_fingerprint,api_key_hint,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE job_key=?", jobKey).Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &j.APIKeyFingerprint, &j.APIKeyHint, &sampledDB, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt)
 	j.Sampled = sampledDB != 0
 	return j, created, err
 }
@@ -1218,7 +1314,7 @@ func (s *Store) ListDueReviewJobs(ctx context.Context, limit int) ([]ReviewJob, 
 		limit = 25
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE status IN ('queued','retry_pending') AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY id LIMIT ?", now, limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,api_key_fingerprint,api_key_hint,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs WHERE status IN ('queued','retry_pending') AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY id LIMIT ?", now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1227,7 +1323,7 @@ func (s *Store) ListDueReviewJobs(ctx context.Context, limit int) ([]ReviewJob, 
 	for rows.Next() {
 		var j ReviewJob
 		var sampled int
-		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &j.APIKeyFingerprint, &j.APIKeyHint, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
 			return nil, err
 		}
 		j.Sampled = sampled != 0
@@ -1263,7 +1359,7 @@ func (s *Store) CompleteReviewJob(ctx context.Context, id int64, status, promoti
 	return err
 }
 
-func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind, content, summary string) error {
+func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind, content, summary string, keyTrace ...string) error {
 	if kind != "trusted" && kind != "risk" {
 		return errors.New("invalid promotion kind")
 	}
@@ -1276,6 +1372,17 @@ func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind,
 	if err := validateHashContent(sha256Value, content); err != nil {
 		return err
 	}
+	apiKeyFingerprint, apiKeyHint := "", ""
+	if len(keyTrace) > 0 {
+		apiKeyFingerprint = keyTrace[0]
+	}
+	if len(keyTrace) > 1 {
+		apiKeyHint = keyTrace[1]
+	}
+	apiKeyFingerprint, apiKeyHint, err := validateAPIKeyTrace(apiKeyFingerprint, apiKeyHint)
+	if err != nil {
+		return err
+	}
 	table := "trusted_hashes"
 	if kind == "risk" {
 		table = "risk_hashes"
@@ -1286,7 +1393,11 @@ func (s *Store) PromoteHash(ctx context.Context, jobID int64, sha256Value, kind,
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,created_at) VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,enabled=1", strings.ToLower(sha256Value), "automatic async quorum", content, "async_quorum", now); err != nil {
+	seenAt := ""
+	if apiKeyFingerprint != "" {
+		seenAt = now
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO "+table+"(sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET label=excluded.label,content=CASE WHEN excluded.content='' THEN "+table+".content ELSE excluded.content END,source=excluded.source,api_key_fingerprint=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_fingerprint ELSE "+table+".api_key_fingerprint END,api_key_hint=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_hint ELSE "+table+".api_key_hint END,api_key_seen_at=CASE WHEN "+table+".api_key_fingerprint='' THEN excluded.api_key_seen_at ELSE "+table+".api_key_seen_at END,enabled=1", strings.ToLower(sha256Value), "automatic async quorum", content, "async_quorum", apiKeyFingerprint, apiKeyHint, seenAt, now); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO rule_promotions(job_id,sha256,kind,vote_summary,created_at) VALUES(?,?,?,?,?)", jobID, strings.ToLower(sha256Value), kind, summary, now); err != nil {
@@ -1302,7 +1413,7 @@ func (s *Store) ListReviewJobs(ctx context.Context, limit int) ([]ReviewJob, err
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs ORDER BY id DESC LIMIT ?", limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,job_key,sha256,field_name,model,api_key_fingerprint,api_key_hint,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at FROM review_jobs ORDER BY id DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1311,7 +1422,7 @@ func (s *Store) ListReviewJobs(ctx context.Context, limit int) ([]ReviewJob, err
 	for rows.Next() {
 		var j ReviewJob
 		var sampled int
-		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.JobKey, &j.SHA256, &j.FieldName, &j.Model, &j.APIKeyFingerprint, &j.APIKeyHint, &sampled, &j.Status, &j.Promotion, &j.Attempts, &j.NextAttemptAt, &j.LastError, &j.CreatedAt, &j.CompletedAt); err != nil {
 			return nil, err
 		}
 		j.Sampled = sampled != 0

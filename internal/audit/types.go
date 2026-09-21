@@ -97,6 +97,7 @@ type Request struct {
 	Model             string
 	Body              []byte
 	APIKeyFingerprint string
+	APIKeyHint        string
 	ClientIP          string
 }
 
@@ -199,27 +200,30 @@ const (
 	EventOutcomeFailOpen EventOutcome = "fail_open"
 )
 
-// Event intentionally excludes plaintext prompt content and API credentials.
+// Event intentionally excludes plaintext API credentials. APIKeyFingerprint is
+// an instance-local HMAC and APIKeyHint is a short masked label for tracing.
 type Event struct {
-	RequestID    string
-	Method       string
-	Path         string
-	Protocol     string
-	Model        string
-	UserAgent    string
-	ProfileKey   string
-	Decision     string
-	Action       EventAction
-	Outcome      EventOutcome
-	Reason       Reason
-	Field        string
-	SHA256       string
-	PromptBytes  int
-	PromptRunes  int
-	AISampled    bool
-	AIVerdict    *AIVerdict
-	AuditLatency time.Duration
-	AILatency    time.Duration
+	RequestID         string
+	Method            string
+	Path              string
+	Protocol          string
+	Model             string
+	UserAgent         string
+	ProfileKey        string
+	APIKeyFingerprint string
+	APIKeyHint        string
+	Decision          string
+	Action            EventAction
+	Outcome           EventOutcome
+	Reason            Reason
+	Field             string
+	SHA256            string
+	PromptBytes       int
+	PromptRunes       int
+	AISampled         bool
+	AIVerdict         *AIVerdict
+	AuditLatency      time.Duration
+	AILatency         time.Duration
 	// Latency is retained as an internal compatibility alias for events
 	// produced by pre-v0.1 callers. New code should set AuditLatency.
 	Latency          time.Duration

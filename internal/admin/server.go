@@ -527,9 +527,11 @@ func (s *Server) hashCollection(w http.ResponseWriter, r *http.Request, path str
 		writeJSON(w, 200, items)
 	case http.MethodPost:
 		var in struct {
-			SHA256  string `json:"sha256"`
-			Label   string `json:"label"`
-			Content string `json:"content"`
+			SHA256            string `json:"sha256"`
+			Label             string `json:"label"`
+			Content           string `json:"content"`
+			APIKeyFingerprint string `json:"api_key_fingerprint"`
+			APIKeyHint        string `json:"api_key_hint"`
 		}
 		if !decodeJSONLimit(w, r, &in, 128<<20) {
 			return
@@ -538,7 +540,7 @@ func (s *Server) hashCollection(w http.ResponseWriter, r *http.Request, path str
 			writeError(w, 400, "rule_content_required", "规则原文不能为空")
 			return
 		}
-		item, err := s.Store.AddHashWithContent(r.Context(), kind, in.SHA256, in.Label, in.Content)
+		item, err := s.Store.AddHashSourceWithTrace(r.Context(), kind, in.SHA256, in.Label, in.Content, "manual", in.APIKeyFingerprint, in.APIKeyHint)
 		if err != nil {
 			writeError(w, 400, "invalid_hash", err.Error())
 			return

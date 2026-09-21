@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.4.0",
+  "product_version": "0.5.0",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -18,6 +18,8 @@
       "path",
       "model",
       "client_profile",
+      "api_key_fingerprint",
+      "api_key_hint",
       "field_name",
       "prompt_sha256",
       "action",
@@ -37,13 +39,13 @@
     {"name": "New API", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"},
     {"name": "CPA", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"}
   ],
-  "not_audited_in_v0_4": [
+  "not_audited_in_v0_5": [
     "/v1/chat/completions",
     "/v1/messages",
     "websocket_message_frames",
     "response_content"
   ],
-  "async_quorum_v0_4": {
+  "async_quorum_v0_5": {
     "configured_nodes": 3,
     "risk_promotion": "2/3 high-confidence reject",
     "trusted_promotion": "2/3 high-confidence pass",
@@ -57,5 +59,12 @@
     "storage": "trusted_hashes.content and risk_hashes.content store plaintext directly",
     "admin_access": "returned by the normal authenticated rule-library API without a second unlock credential",
     "legacy_rules": "hash-only rows remain identifiable, can be backfilled manually, and are filled automatically on the next exact match"
+  },
+  "api_key_trace_v0_5": {
+    "fingerprint": "HMAC-SHA-256 of the normalized request credential using the instance master key",
+    "hint": "strictly masked prefix and final four safe characters, or four bullets",
+    "raw_key_storage": "forbidden in events, rules, jobs, logs, responses, and administration APIs",
+    "events": "all observable audited and bypass events include trace fields when Authorization is present",
+    "rules": "trusted and risk rows keep the first source trace; legacy rows fill it on the next exact match"
   }
 }

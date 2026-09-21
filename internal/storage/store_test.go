@@ -44,6 +44,9 @@ func TestOpenIsIdempotentAndDataSurvivesRestart(t *testing.T) {
 	if migrationCount != 1 {
 		t.Fatalf("event-contract migration count = %d, want 1", migrationCount)
 	}
+	if err := second.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version=5").Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("key-trace migration count = (%d, %v), want (1, nil)", migrationCount, err)
+	}
 
 	cfg, err := first.GetConfig(ctx, "http://initial-upstream.example")
 	if err != nil {
@@ -116,6 +119,31 @@ func TestHashPlaintextValidationAndLegacyBackfill(t *testing.T) {
 	entries, err := store.ListHashes(ctx, "risk")
 	if err != nil || len(entries) != 1 || entries[0].Content != content {
 		t.Fatalf("backfilled rules = (%+v, %v)", entries, err)
+	}
+}
+
+func TestHashContextStoresOnlyFirstMaskedKeyTrace(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	content := "rule with API key provenance"
+	hash := hashPlaintext(content)
+	firstFingerprint := strings.Repeat("a", 64)
+	secondFingerprint := strings.Repeat("b", 64)
+	if _, err := store.AddHash(ctx, "trusted", hash, "legacy"); err != nil {
+		t.Fatalf("AddHash: %v", err)
+	}
+	if err := store.StoreHashContext(ctx, "trusted", hash, content, firstFingerprint, "sk-…A7F2"); err != nil {
+		t.Fatalf("StoreHashContext: %v", err)
+	}
+	if err := store.StoreHashContext(ctx, "trusted", hash, content, secondFingerprint, "sk-…B8E3"); err != nil {
+		t.Fatalf("second StoreHashContext: %v", err)
+	}
+	entries, err := store.ListHashes(ctx, "trusted")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ListHashes = (%+v, %v)", entries, err)
+	}
+	if entries[0].APIKeyFingerprint != firstFingerprint || entries[0].APIKeyHint != "sk-…A7F2" || entries[0].APIKeySeenAt == "" {
+		t.Fatalf("stored key trace = %+v, want first source", entries[0])
 	}
 }
 
@@ -741,6 +769,28 @@ func TestEventContractAndReviewerFreeTextIsNotPersisted(t *testing.T) {
 		t.Fatalf("reviewer free text persisted: reason=%q category=%q", aiReason, aiCategory)
 	}
 	assertDatabaseArtifactsExclude(t, dataDir, canary)
+}
+
+func TestEventPersistsMaskedAPIKeyTraceAndSupportsSearch(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	event := testAuditEvent("key-trace-event", time.Now().UTC())
+	event.APIKeyFingerprint = strings.Repeat("d", 64)
+	event.APIKeyHint = "sk-…9F2A"
+	if err := store.RecordAuditEvent(ctx, event); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+	items, total, err := store.ListEvents(ctx, 1, 20, "", "9F2A")
+	if err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("ListEvents key search = (%+v, %d, %v)", items, total, err)
+	}
+	if items[0].APIKeyFingerprint != event.APIKeyFingerprint || items[0].APIKeyHint != event.APIKeyHint {
+		t.Fatalf("event key trace = %+v", items[0])
+	}
+	detail, err := store.GetEvent(ctx, items[0].ID)
+	if err != nil || detail.APIKeyFingerprint != event.APIKeyFingerprint || detail.APIKeyHint != event.APIKeyHint {
+		t.Fatalf("GetEvent key trace = (%+v, %v)", detail, err)
+	}
 }
 
 func TestListEventsFiltersKeepEvidencePlaceholderOrdering(t *testing.T) {

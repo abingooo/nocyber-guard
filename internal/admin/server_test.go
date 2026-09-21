@@ -252,7 +252,8 @@ func TestHashCRUD(t *testing.T) {
 	content := "  风险规则原文\n保留换行  "
 	digest := sha256.Sum256([]byte(content))
 	hash := hex.EncodeToString(digest[:])
-	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/risk-hashes", map[string]any{"sha256": "", "label": "before", "content": content})
+	fingerprint := strings.Repeat("e", 64)
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/risk-hashes", map[string]any{"sha256": "", "label": "before", "content": content, "api_key_fingerprint": fingerprint, "api_key_hint": "sk-…7A9C"})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%q", rr.Code, rr.Body.String())
 	}
@@ -260,7 +261,7 @@ func TestHashCRUD(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.SHA256 != hash || created.Content != content {
+	if created.SHA256 != hash || created.Content != content || created.APIKeyFingerprint != fingerprint || created.APIKeyHint != "sk-…7A9C" || created.APIKeySeenAt == "" {
 		t.Fatalf("created hash plaintext = %+v", created)
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/risk-hashes", nil)

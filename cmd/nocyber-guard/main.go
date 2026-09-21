@@ -60,12 +60,14 @@ func (rules ruleSnapshot) LookupHash(_ context.Context, sha string) (audit.HashM
 }
 
 type asyncReviewJob struct {
-	Hash        string
-	Field       string
-	Content     string
-	RuleContent string
-	Sampled     bool
-	Model       string
+	Hash              string
+	Field             string
+	Content           string
+	RuleContent       string
+	Sampled           bool
+	Model             string
+	APIKeyFingerprint string
+	APIKeyHint        string
 }
 
 type asyncRuntime struct {
@@ -150,7 +152,7 @@ func (ar *asyncRuntime) recoverDue() {
 			// proves it is the exact selected field.
 			ruleContent = sample
 		}
-		if !ar.enqueue(asyncReviewJob{Hash: record.SHA256, Field: record.FieldName, Content: sample, RuleContent: ruleContent, Sampled: record.Sampled, Model: record.Model}) {
+		if !ar.enqueue(asyncReviewJob{Hash: record.SHA256, Field: record.FieldName, Content: sample, RuleContent: ruleContent, Sampled: record.Sampled, Model: record.Model, APIKeyFingerprint: record.APIKeyFingerprint, APIKeyHint: record.APIKeyHint}) {
 			return
 		}
 	}
@@ -168,7 +170,7 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Content, job.RuleContent, job.Sampled)
+	record, created, err := ar.store.CreateReviewJob(ctx, job.Hash, job.Hash, job.Field, job.Model, job.Content, job.RuleContent, job.Sampled, job.APIKeyFingerprint, job.APIKeyHint)
 	if err != nil {
 		ar.logger.Warn("async_review_job_create_failed", "sha256", job.Hash, "error", err)
 		return
@@ -186,6 +188,8 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 		if job.RuleContent == "" && !record.Sampled && plaintextHash(job.Content) == record.SHA256 {
 			job.RuleContent = job.Content
 		}
+		job.APIKeyFingerprint = record.APIKeyFingerprint
+		job.APIKeyHint = record.APIKeyHint
 	}
 	claimed, err := ar.store.ClaimReviewJob(ctx, record.ID)
 	if err != nil || !claimed {
@@ -209,7 +213,7 @@ func (ar *asyncRuntime) process(job asyncReviewJob) {
 	kind, promoted := votes.Kind, votes.Reached && !votes.Conflict
 	if promoted {
 		summary := makeVoteSummary(votes.Votes)
-		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, job.RuleContent, summary); err != nil {
+		if err := ar.store.PromoteHash(ctx, record.ID, job.Hash, kind, job.RuleContent, summary, job.APIKeyFingerprint, job.APIKeyHint); err != nil {
 			ar.logger.Warn("async_rule_promotion_failed", "job_id", record.ID, "error", err)
 			_ = ar.store.CompleteReviewJob(ctx, record.ID, "failed", "")
 			return
@@ -522,7 +526,8 @@ func (a auditorAdapter) Evaluate(ctx context.Context, req *http.Request, body []
 		return proxy.Decision{Allow: true}, errors.New("audit runtime type invalid")
 	}
 	id := eventRequestID(req.Header.Get("X-Request-ID"))
-	result := state.engine.Evaluate(ctx, audit.Request{ID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: audit.ProtocolResponses, UserAgent: req.UserAgent(), Body: body, APIKeyFingerprint: a.apiKeyFingerprint(req.Header.Get("Authorization")), ClientIP: a.clientIP(req)})
+	apiKeyFingerprint, apiKeyHint := a.apiKeyTrace(req.Header.Get("Authorization"))
+	result := state.engine.Evaluate(ctx, audit.Request{ID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: audit.ProtocolResponses, UserAgent: req.UserAgent(), Body: body, APIKeyFingerprint: apiKeyFingerprint, APIKeyHint: apiKeyHint, ClientIP: a.clientIP(req)})
 	if result.Hash != "" && result.RuleContent != "" {
 		kind := ""
 		switch result.Reason {
@@ -532,8 +537,8 @@ func (a auditorAdapter) Evaluate(ctx context.Context, req *http.Request, body []
 			kind = "risk"
 		}
 		if kind != "" {
-			if err := a.runtime.store.StoreHashContent(ctx, kind, result.Hash, result.RuleContent); err != nil {
-				a.runtime.logger.Warn("hash_content_backfill_failed", "kind", kind, "sha256", result.Hash, "error", err)
+			if err := a.runtime.store.StoreHashContext(ctx, kind, result.Hash, result.RuleContent, apiKeyFingerprint, apiKeyHint); err != nil {
+				a.runtime.logger.Warn("hash_context_backfill_failed", "kind", kind, "sha256", result.Hash, "error", err)
 			}
 		}
 	}
@@ -542,14 +547,15 @@ func (a auditorAdapter) Evaluate(ctx context.Context, req *http.Request, body []
 	// requests after a complete vote is persisted.
 	if a.runtime.asyncRunner != nil && result.Hash != "" && result.Field != "" && result.Reason != audit.ReasonTrustedHashMatch && result.Reason != audit.ReasonRiskHashMatch {
 		if result.ReviewContent != "" {
-			a.runtime.asyncRunner.enqueue(asyncReviewJob{Hash: result.Hash, Field: result.Field, Content: result.ReviewContent, RuleContent: result.RuleContent, Sampled: result.AISampled, Model: result.Model})
+			a.runtime.asyncRunner.enqueue(asyncReviewJob{Hash: result.Hash, Field: result.Field, Content: result.ReviewContent, RuleContent: result.RuleContent, Sampled: result.AISampled, Model: result.Model, APIKeyFingerprint: apiKeyFingerprint, APIKeyHint: apiKeyHint})
 		}
 	}
 	return proxy.Decision{Allow: result.Allow, Blocked: result.Blocked, Reason: string(result.Reason), RequestID: id, AuditMs: result.AuditLatency.Milliseconds(), UAProfile: result.ProfileKey, Field: result.Field, Hash: result.Hash, Model: result.Model}, nil
 }
 func (a auditorAdapter) Observe(_ context.Context, req *http.Request, reason string) {
 	id := eventRequestID(req.Header.Get("X-Request-ID"))
-	_ = a.runtime.RecordAuditEvent(context.Background(), audit.Event{RequestID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: "unreviewed", UserAgent: audit.SanitizeUserAgent(req.UserAgent()), Decision: "allow", Reason: audit.Reason(reason), CreatedAt: time.Now().UTC()})
+	apiKeyFingerprint, apiKeyHint := a.apiKeyTrace(req.Header.Get("Authorization"))
+	_ = a.runtime.RecordAuditEvent(context.Background(), audit.Event{RequestID: id, Method: req.Method, Path: boundedEventValue(req.URL.Path, 2048), Protocol: "unreviewed", UserAgent: audit.SanitizeUserAgent(req.UserAgent()), APIKeyFingerprint: apiKeyFingerprint, APIKeyHint: apiKeyHint, Decision: "allow", Reason: audit.Reason(reason), CreatedAt: time.Now().UTC()})
 }
 func eventRequestID(value string) string {
 	value = strings.TrimSpace(value)
@@ -703,12 +709,41 @@ func testAIEndpoint(request *http.Request, endpoint storage.AIEndpoint) (time.Du
 }
 
 func (a auditorAdapter) apiKeyFingerprint(value string) string {
-	if value == "" {
-		return ""
+	fingerprint, _ := a.apiKeyTrace(value)
+	return fingerprint
+}
+
+func (a auditorAdapter) apiKeyTrace(value string) (string, string) {
+	credential := strings.TrimSpace(value)
+	if credential == "" {
+		return "", ""
+	}
+	parts := strings.Fields(credential)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		credential = parts[1]
+	}
+	if credential == "" {
+		return "", ""
 	}
 	mac := hmac.New(sha256.New, a.runtime.fingerprintKey)
-	_, _ = mac.Write([]byte(value))
-	return hex.EncodeToString(mac.Sum(nil))
+	_, _ = mac.Write([]byte(credential))
+	fingerprint := hex.EncodeToString(mac.Sum(nil))
+	runes := []rune(credential)
+	if len(runes) < 8 {
+		return fingerprint, "••••"
+	}
+	suffix := string(runes[len(runes)-4:])
+	for _, char := range suffix {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-') {
+			return fingerprint, "••••"
+		}
+	}
+	prefix := ""
+	lower := strings.ToLower(credential)
+	if strings.HasPrefix(lower, "sk-") || strings.HasPrefix(lower, "sk_") {
+		prefix = string(runes[:3])
+	}
+	return fingerprint, prefix + "…" + suffix
 }
 func (a auditorAdapter) clientIP(req *http.Request) string {
 	host, _, err := net.SplitHostPort(req.RemoteAddr)

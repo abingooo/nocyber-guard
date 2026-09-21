@@ -2,7 +2,7 @@
 
 NoCyber Guard is a small, transparent instruction-audit gateway for
 Sub2API, New API, and other OpenAI-compatible gateways. It sits in front of an
-upstream and forwards requests unchanged after the audit decision. The v0.4
+upstream and forwards requests unchanged after the audit decision. The v0.5
 default is permissive: only an explicit risk decision blocks a request;
 unknown clients, parse failures, and reviewer outages are recorded and passed
 through. Three independent asynchronous reviewers can now vote after a
@@ -13,9 +13,19 @@ job and cancels outstanding calls. Timeout, error, uncertain, low-confidence,
 or conflicting votes are non-votes and never promote a rule. Promotions affect
 subsequent requests and do not require manual approval.
 
-## Rule plaintext
+## Key traceability and rule plaintext
 
-Every rule created in v0.4 stores both the SHA-256 digest and the exact selected
+Every observed request records an instance-local HMAC-SHA-256 fingerprint of
+its API credential plus a masked hint such as `sk-…A7F2`. The raw credential is
+never written to SQLite, logs, responses, or the administrator API. Because the
+HMAC uses the instance master key, the same API key can be searched and grouped
+inside one Guard installation without becoming a portable cross-instance
+identifier. Trusted and risk rules retain the first request-key trace that led
+to or later matched the rule; legacy rules fill this metadata on their next
+exact match. The normal authenticated administration UI displays the hint and
+short fingerprint and supports searching events by either value.
+
+Every rule created since v0.4 stores both the SHA-256 digest and the exact selected
 instruction text. The server computes or verifies the digest before writing the
 rule. Trusted and risk library pages return and display that plaintext to a
 normally signed-in administrator; there is no second administrator key,
@@ -55,7 +65,7 @@ not commit the value. `NCG_MASTER_KEY_FILE` and
 files; do not define the corresponding direct variable, even as an empty
 string, when using file mode. Local Compose file secrets are bind mounts, so
 make their host files owned by UID/GID `65532` with mode `0400`. The initial
-administrator password is consumed on first initialization. v0.4 does not
+administrator password is consumed on first initialization. v0.5 does not
 expose a password-change endpoint; changing it later requires a separately
 controlled offline administration procedure.
 
@@ -83,7 +93,7 @@ any request bytes were sent. Do not add `non_idempotent` or HTTP response
 status codes to that retry policy.
 
 Keep `Upgrade`, `Connection`, `X-Forwarded-*`, request buffering, and long read
-timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.4
+timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.5
 audits the OpenAI Responses HTTP paths listed in `compatibility.json`; it does
 not inspect WebSocket frames or Chat Completions/Messages bodies.
 
@@ -125,7 +135,7 @@ blindly switch databases or replay POSTs; reconcile the audit records first.
 
 ## Migrating legacy ModelPort V2 rules
 
-v0.4 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
+v0.5 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
 vault, AI-node credentials, users, or events. The old V2 implementation uses
 platform-specific group/profile scopes and encrypted evidence that cannot be
 copied safely into an independent product.
@@ -140,7 +150,7 @@ accept, print, or store a password or API key. Review and validate the export
 before import, and repeat it immediately before a production cutover.
 
 Because the ModelPort hash tables do not contain reversible instruction text,
-v0.4 skips hash-only migration rows instead of creating new incomplete rules.
+v0.5 skips hash-only migration rows instead of creating new incomplete rules.
 An operator may add an exact `content` value to a reviewed migration row; the
 Guard API verifies it against `sha256` before import. Rules already present in
 an upgraded Guard database remain available and can be backfilled as described

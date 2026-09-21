@@ -324,6 +324,7 @@ func (engine *Engine) event(request Request, result Result) Event {
 	return Event{
 		RequestID: request.ID, Method: request.Method, Path: request.Path, Protocol: request.Protocol,
 		Model: result.Model, UserAgent: SanitizeUserAgent(request.UserAgent), ProfileKey: result.ProfileKey,
+		APIKeyFingerprint: request.APIKeyFingerprint, APIKeyHint: request.APIKeyHint,
 		Decision: decision, Action: action, Outcome: outcome, Reason: result.Reason, Field: result.Field, SHA256: result.Hash,
 		PromptBytes: result.PromptBytes, PromptRunes: result.PromptRunes, AISampled: result.AISampled,
 		AIVerdict: verdict, AuditLatency: result.AuditLatency, AILatency: aiLatency,

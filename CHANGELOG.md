@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0 - 2026-09-21
+
+- Added an instance-local HMAC fingerprint and strictly masked hint for request API keys without persisting raw credentials.
+- Added key traces to audited and bypass events, event search, event details, review-job recovery, and asynchronous rule promotion.
+- Trusted and risk rules now retain their first observed source-key trace; legacy rows are filled on the next exact match.
+- Added schema-v5 migration, administration UI columns, copy/search controls, and secret-leak regression coverage.
+
 ## v0.4.0 - 2026-09-21
 
 - Added exact plaintext retention to trusted and risk rules, with SHA-256 verification and direct viewing through the normal authenticated administration UI.

@@ -37,6 +37,10 @@ function outcomeClass(event: AuditEvent) {
   return event.outcome === 'fail_open' ? 'bypass' : event.decision
 }
 function shortHash(value?: string) { return value ? `${value.slice(0, 10)}…${value.slice(-8)}` : '—' }
+function keyTrace(event: AuditEvent) {
+  if (!event.api_key_fingerprint) return '未提供'
+  return `${event.api_key_hint || '已识别'} · ${event.api_key_fingerprint.slice(0, 12)}`
+}
 
 async function load() {
   loading.value = true
@@ -96,6 +100,8 @@ async function addRule(kind: 'trusted' | 'risk') {
       sha256: selected.value.prompt_sha256,
       label: `审核事件 #${selected.value.id}`,
       content: ruleContent.value,
+      api_key_fingerprint: selected.value.api_key_fingerprint,
+      api_key_hint: selected.value.api_key_hint,
     })
     ruleNotice.value = kind === 'risk' ? '已加入风险库' : '已加入可信库'
     toast.show(ruleNotice.value)
@@ -127,7 +133,7 @@ onMounted(load)
 
     <article v-if="showFilters" class="filter-panel panel">
       <div class="filter-grid">
-        <label>搜索请求 / 哈希<input v-model="query.search" placeholder="输入关键词" @keyup.enter="applyFilters" /></label>
+        <label>搜索请求 / Hash / Key<input v-model="query.search" placeholder="输入请求 ID、Hash 或 Key 尾号" @keyup.enter="applyFilters" /></label>
         <label>决策结果<select v-model="query.decision"><option value="">全部结果</option><option value="allow">放行</option><option value="block">阻断</option></select></label>
         <label>开始日期<input v-model="query.from" type="date" /></label>
         <label>结束日期<input v-model="query.to" type="date" /></label>
@@ -157,7 +163,7 @@ onMounted(load)
             <tr v-for="event in result.items" :key="event.id">
               <td><span class="decision-badge" :class="`decision-${outcomeClass(event)}`"><ShieldAlert v-if="event.outcome !== 'allow'" :size="14" /><ShieldCheck v-else :size="14" />{{ outcomeLabel(event.outcome) }}</span></td>
               <td class="nowrap">{{ formatTime(event.created_at) }}</td>
-              <td><strong>{{ event.client_profile || '未识别客户端' }}</strong><small class="table-sub">{{ event.model || '未知模型' }}</small></td>
+              <td><strong>{{ event.client_profile || '未识别客户端' }}</strong><small class="table-sub">{{ event.model || '未知模型' }}</small><small class="table-sub key-trace">Key {{ keyTrace(event) }}</small></td>
               <td><span class="reason-cell">{{ event.reason || '—' }}</span><small v-if="event.field_name" class="table-sub">字段：{{ event.field_name }}</small></td>
               <td><button class="hash-button" :title="event.prompt_sha256" @click="event.prompt_sha256 && copy(event.prompt_sha256, 'Hash')"><code>{{ shortHash(event.prompt_sha256) }}</code><Copy v-if="event.prompt_sha256" :size="13" /></button></td>
               <td>{{ event.audit_latency_ms ?? event.latency_ms ?? '—' }}<span v-if="event.audit_latency_ms || event.latency_ms"> ms</span></td>
@@ -212,6 +218,7 @@ onMounted(load)
           <div><dt>客户端</dt><dd>{{ selected.client_profile || '未识别客户端' }}</dd></div>
           <div><dt>User-Agent</dt><dd class="breakable">{{ selected.user_agent || '—' }}</dd></div>
           <div><dt>模型</dt><dd>{{ selected.model || '—' }}</dd></div>
+          <div><dt>API Key</dt><dd class="breakable"><span>{{ selected.api_key_hint || '未提供' }}</span><template v-if="selected.api_key_fingerprint"> · <code>{{ selected.api_key_fingerprint }}</code><button class="inline-copy" @click="copy(selected.api_key_fingerprint, 'Key 指纹')"><Copy :size="13" /></button></template></dd></div>
           <div><dt>选中字段</dt><dd>{{ selected.field_name || '—' }}</dd></div>
           <div><dt>Prompt Hash</dt><dd class="breakable"><code>{{ selected.prompt_sha256 || '—' }}</code></dd></div>
           <div><dt>AI 结果</dt><dd>{{ selected.ai_result || '—' }}<span v-if="selected.ai_confidence != null">（置信度 {{ (selected.ai_confidence * 100).toFixed(0) }}%）</span></dd></div>

@@ -40,6 +40,25 @@ func TestClientIPIgnoresForwardingFromUntrustedPeer(t *testing.T) {
 	}
 }
 
+func TestAPIKeyTraceIsStableMaskedAndSchemeIndependent(t *testing.T) {
+	adapter := auditorAdapter{runtime: &runtime{fingerprintKey: []byte("instance-fingerprint-key")}}
+	raw := "sk-project-secret-ABC7"
+	fingerprint, hint := adapter.apiKeyTrace("Bearer " + raw)
+	secondFingerprint, secondHint := adapter.apiKeyTrace("bearer   " + raw)
+	if fingerprint == "" || len(fingerprint) != 64 || fingerprint != secondFingerprint {
+		t.Fatalf("fingerprints = (%q, %q), want stable 64-character HMAC", fingerprint, secondFingerprint)
+	}
+	if hint != "sk-…ABC7" || secondHint != hint {
+		t.Fatalf("hints = (%q, %q), want masked key", hint, secondHint)
+	}
+	if fingerprint == raw || hint == raw {
+		t.Fatal("raw API key was returned by trace helper")
+	}
+	if fingerprint, hint := adapter.apiKeyTrace(""); fingerprint != "" || hint != "" {
+		t.Fatalf("empty trace = (%q, %q)", fingerprint, hint)
+	}
+}
+
 func TestAuditorAdapterPinsOneRuntimeGenerationPerRequest(t *testing.T) {
 	first := &runtimeState{enabled: true, paths: map[string]struct{}{`/v1/responses`: {}}, auditBodyLimit: 1024}
 	second := &runtimeState{enabled: true, paths: map[string]struct{}{`/other`: {}}, auditBodyLimit: 2048}

@@ -32,6 +32,8 @@ export interface AuditEvent {
   client_profile?: string
   user_agent?: string
   model?: string
+  api_key_fingerprint?: string
+  api_key_hint?: string
   prompt_sha256?: string
   ai_result?: string
   ai_confidence?: number
@@ -63,6 +65,9 @@ export interface HashEntry {
   label: string
   content: string
   source?: string
+  api_key_fingerprint?: string
+  api_key_hint?: string
+  api_key_seen_at?: string
   enabled: boolean
   created_at: string
 }

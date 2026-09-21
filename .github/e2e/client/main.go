@@ -65,6 +65,8 @@ type event struct {
 	Reason            string `json:"reason"`
 	FieldName         string `json:"field_name"`
 	ClientProfile     string `json:"client_profile"`
+	APIKeyFingerprint string `json:"api_key_fingerprint"`
+	APIKeyHint        string `json:"api_key_hint"`
 	PromptSHA256      string `json:"prompt_sha256"`
 	UpstreamAccessed  bool   `json:"upstream_accessed"`
 	EvidenceAvailable bool   `json:"evidence_available"`
@@ -527,8 +529,17 @@ func (s *suite) checkRiskBlock() error {
 	if blocked.ID == 0 || blocked.Path != "/v1/responses" || blocked.Decision != "block" ||
 		blocked.Action != "audit" || blocked.Outcome != "block" || blocked.Reason != "risk_hash_match" ||
 		blocked.FieldName != "instructions" || blocked.ClientProfile != "codex_cli" ||
+		len(blocked.APIKeyFingerprint) != 64 || blocked.APIKeyHint != "…A7F2" ||
 		blocked.UpstreamAccessed || !blocked.EvidenceAvailable {
 		return errors.New("blocked event contract is incomplete")
+	}
+	if bytes.Contains(eventsBody, []byte("e2e-client-secret-A7F2")) {
+		return errors.New("ordinary event API exposed a raw request API key")
+	}
+	response, rulesBody, _, err = s.adminJSON(http.MethodGet, "/api/v1/risk-hashes", nil)
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(rulesBody, []byte(`"api_key_hint":"…A7F2"`)) ||
+		bytes.Contains(rulesBody, []byte("e2e-client-secret-A7F2")) {
+		return errors.New("risk rule did not retain only the masked source-key trace")
 	}
 	if !hasUnreviewedMarkers(listing.Items) {
 		return errors.New("missing unreviewed traffic marker")
@@ -561,7 +572,7 @@ func (s *suite) checkRiskBlock() error {
 
 func (s *suite) expectBlocked(prompt string) error {
 	payload, _ := json.Marshal(map[string]string{"model": "e2e", "instructions": prompt})
-	headers := http.Header{"Content-Type": []string{"application/json"}, "User-Agent": []string{"codex_cli_rs/0.1"}}
+	headers := http.Header{"Content-Type": []string{"application/json"}, "User-Agent": []string{"codex_cli_rs/0.1"}, "Authorization": []string{"Bearer e2e-client-secret-A7F2"}}
 	response, body, err := s.request(s.dataClient, http.MethodPost, s.guardURL+"/v1/responses?trace=e2e", payload, headers)
 	if err != nil {
 		return err
