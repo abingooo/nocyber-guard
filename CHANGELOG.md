@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.0 - 2026-09-22
+
+- Replaced the desktop sidebar with a compact responsive top navigation and added the NoCyber shield favicon.
+- Rebuilt the overview from real SQLite data: twelve-hour request/block trends, audit and AI latency samples, latest activity, configured nodes, and asynchronous rule promotions.
+- Made the upstream service URL editable and hot-reloadable for new requests while preserving optimistic concurrency and self-listener validation.
+- Fixed stale trusted/risk rows when switching routes and stabilized rule status controls at narrow table widths.
+- Removed internal configuration version badges from the administration UI.
+- Added an in-console update center backed by a restricted host Unix-socket agent, pinned official image digests, health verification, automatic failed-update rollback, and manual one-click rollback.
+
 ## v0.6.0 - 2026-09-22
 
 - Added authenticated deletion for individual audit events and bulk cleanup for all events or events before a selected date.

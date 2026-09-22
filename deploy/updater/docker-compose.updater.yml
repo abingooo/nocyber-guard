@@ -1,0 +1,6 @@
+services:
+  guard:
+    environment:
+      - NCG_UPDATER_SOCKET=/run/nocyber-updater/updater.sock
+    volumes:
+      - /run/nocyber-updater:/run/nocyber-updater:ro

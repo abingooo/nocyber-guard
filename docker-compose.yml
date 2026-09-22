@@ -42,6 +42,7 @@ services:
       - NCG_AI_TIMEOUT=${NCG_AI_TIMEOUT:-15s}
       - NCG_AI_QUEUE_TIMEOUT=${NCG_AI_QUEUE_TIMEOUT:-2s}
       - NCG_ADMIN_COOKIE_SECURE=${NCG_ADMIN_COOKIE_SECURE:-false}
+      - NCG_UPDATER_SOCKET
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
       - ${NCG_DATA_PATH:-./data}:/data

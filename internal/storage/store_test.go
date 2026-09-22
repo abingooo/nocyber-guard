@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -84,8 +85,8 @@ func TestOpenIsIdempotentAndDataSurvivesRestart(t *testing.T) {
 	if restored.Version != 2 {
 		t.Errorf("restored config version = %d, want 2", restored.Version)
 	}
-	if restored.UpstreamURL != "http://runtime-upstream.example" {
-		t.Errorf("restored upstream = %q, want runtime override", restored.UpstreamURL)
+	if restored.UpstreamURL != "http://persisted-upstream.example" {
+		t.Errorf("restored upstream = %q, want persisted value", restored.UpstreamURL)
 	}
 	match, found, err := reopened.LookupHash(ctx, hash)
 	if err != nil {
@@ -372,8 +373,8 @@ func TestConfigVersionUpdateAndConflict(t *testing.T) {
 	if current.Version != initial.Version+1 {
 		t.Errorf("updated version = %d, want %d", current.Version, initial.Version+1)
 	}
-	if current.UpstreamURL != "http://runtime-upstream.example" || current.RequestTimeoutMS != updated.RequestTimeoutMS {
-		t.Errorf("updated config = %+v, want fixed runtime upstream and timeout %d", current, updated.RequestTimeoutMS)
+	if current.UpstreamURL != updated.UpstreamURL || current.RequestTimeoutMS != updated.RequestTimeoutMS {
+		t.Errorf("updated config = %+v, want persisted upstream and timeout %d", current, updated.RequestTimeoutMS)
 	}
 
 	stale := current
@@ -934,6 +935,30 @@ func TestExpiredEvidenceIsNotAdvertisedBeforeCleanup(t *testing.T) {
 	detail, err := store.GetEvent(ctx, id)
 	if err != nil || detail.EvidenceAvailable {
 		t.Fatalf("GetEvent expired evidence = (%+v, %v)", detail, err)
+	}
+}
+
+func TestOverviewUsesRecordedHourlyAndLatencyData(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	event := testAuditEvent("overview-real-data", time.Now().UTC())
+	event.Decision = "block"
+	event.Action = audit.EventActionAudit
+	event.Outcome = audit.EventOutcomeBlock
+	event.AuditLatency = 27 * time.Millisecond
+	event.AILatency = 19 * time.Millisecond
+	if err := store.RecordAuditEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.Overview(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["total_requests"] != int64(1) || stats["blocked_requests"] != int64(1) || stats["avg_audit_latency_ms"] != int64(27) || stats["avg_ai_latency_ms"] != int64(19) {
+		t.Fatalf("unexpected overview stats: %+v", stats)
+	}
+	if got := reflect.ValueOf(stats["hourly"]).Len(); got != 12 {
+		t.Fatalf("hourly buckets = %d, want 12", got)
 	}
 }
 

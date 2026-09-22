@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abingooo/nocyber-guard/internal/buildinfo"
 	"github.com/abingooo/nocyber-guard/internal/storage"
 	webassets "github.com/abingooo/nocyber-guard/web"
 )
@@ -31,8 +33,10 @@ type Server struct {
 	SecureCookies      bool
 	StartedAt          time.Time
 	OnReload           func(context.Context) error
+	ValidateUpstream   func(*url.URL) error
 	ValidateAIEndpoint func(*url.URL) error
 	TestAI             func(ctx *http.Request, endpoint storage.AIEndpoint) (time.Duration, error)
+	UpdaterSocket      string
 	limiter            *loginLimiter
 }
 
@@ -135,6 +139,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.testAsyncNode(w, r, path)
 	case path == "/review-jobs" && r.Method == http.MethodGet:
 		s.reviewJobs(w, r)
+	case path == "/system/update" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
+		s.systemUpdate(w, r)
+	case path == "/system/rollback" && r.Method == http.MethodPost:
+		s.systemRollback(w, r)
 	case strings.HasPrefix(path, "/review-jobs/") && strings.HasSuffix(path, "/votes") && r.Method == http.MethodGet:
 		s.reviewVotes(w, r, path)
 	case path == "/trusted-hashes" || path == "/risk-hashes":
@@ -158,6 +166,93 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) systemUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		payload, status, err := s.callUpdater(r.Context(), http.MethodGet, "/v1/status", nil)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"available": false, "current_version": buildinfo.Version, "message": "更新服务未连接"})
+			return
+		}
+		payload["available"] = status >= 200 && status < 300
+		payload["current_version"] = buildinfo.Version
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+	var input struct {
+		Version string `json:"version"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	payload, status, err := s.callUpdater(r.Context(), http.MethodPost, "/v1/update", input)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "updater_unavailable", "更新服务未连接")
+		return
+	}
+	if status < 200 || status >= 300 {
+		message, _ := payload["message"].(string)
+		if message == "" {
+			message = "无法开始更新"
+		}
+		writeError(w, status, "update_rejected", message)
+		return
+	}
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) systemRollback(w http.ResponseWriter, r *http.Request) {
+	payload, status, err := s.callUpdater(r.Context(), http.MethodPost, "/v1/rollback", map[string]any{})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "updater_unavailable", "更新服务未连接")
+		return
+	}
+	if status < 200 || status >= 300 {
+		message, _ := payload["message"].(string)
+		if message == "" {
+			message = "无法开始回滚"
+		}
+		writeError(w, status, "rollback_rejected", message)
+		return
+	}
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) callUpdater(ctx context.Context, method, path string, body any) (map[string]any, int, error) {
+	if strings.TrimSpace(s.UpdaterSocket) == "" {
+		return nil, 0, errors.New("updater socket is not configured")
+	}
+	var requestBody io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		requestBody = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, requestBody)
+	if err != nil {
+		return nil, 0, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", s.UpdaterSocket)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	response, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return nil, response.StatusCode, err
+	}
+	return payload, response.StatusCode, nil
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, e := r.Cookie(sessionCookie); e == nil {
 		s.Store.Logout(r.Context(), c.Value)
@@ -176,10 +271,9 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	counts["enabled"] = cfg.Enabled
 	counts["mode"] = "permissive"
 	counts["uptime_seconds"] = int64(time.Since(s.StartedAt).Seconds())
-	counts["config_version"] = cfg.Version
 	endpoint, _ := s.Store.GetAIEndpoint(r.Context())
-	counts["ai_available"] = endpoint.BaseURL != "" && endpoint.Model != "" && endpoint.HasAPIKey
-	counts["ai_latency_ms"] = 0
+	counts["ai_configured"] = endpoint.BaseURL != "" && endpoint.Model != "" && endpoint.HasAPIKey
+	counts["ai_model"] = endpoint.Model
 	items, _, _ := s.Store.ListEvents(r.Context(), 1, 8, "", "")
 	counts["recent_events"] = items
 	writeJSON(w, 200, counts)
@@ -398,19 +492,21 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expected := *raw.Expected
-	fixedUpstream := strings.TrimSpace(s.FixedUpstreamURL)
-	if fixedUpstream == "" {
-		writeError(w, 503, "upstream_unavailable", "固定上游地址未配置")
-		return
-	}
-	if strings.TrimSpace(raw.UpstreamURL) != fixedUpstream {
-		writeError(w, 400, "upstream_immutable", "上游地址只能通过 NCG_UPSTREAM_URL 配置")
-		return
-	}
-	raw.UpstreamURL = fixedUpstream
+	raw.UpstreamURL = strings.TrimSpace(raw.UpstreamURL)
 	if err := storage.ValidateConfig(raw.Config); err != nil {
 		writeError(w, 400, "invalid_config", err.Error())
 		return
+	}
+	upstream, err := url.Parse(raw.UpstreamURL)
+	if err != nil {
+		writeError(w, 400, "invalid_upstream", "上游服务地址无效")
+		return
+	}
+	if s.ValidateUpstream != nil {
+		if err = s.ValidateUpstream(upstream); err != nil {
+			writeError(w, 400, "invalid_upstream", "上游服务地址不能指向 Guard 自身")
+			return
+		}
 	}
 	if err := s.Store.PutConfig(r.Context(), raw.Config, expected); err != nil {
 		if strings.Contains(err.Error(), "version conflict") {
@@ -423,7 +519,7 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.reloadRuntime(w, r) {
 		return
 	}
-	saved, err := s.Store.GetConfig(r.Context(), fixedUpstream)
+	saved, err := s.Store.GetConfig(r.Context(), s.FixedUpstreamURL)
 	if err != nil {
 		writeError(w, 500, "storage_error", "读取已保存配置失败")
 		return

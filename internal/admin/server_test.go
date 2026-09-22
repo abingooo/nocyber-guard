@@ -178,7 +178,7 @@ func TestAsyncNodeTestUsesUnsavedFormAndPreservesStoredSecret(t *testing.T) {
 	}
 }
 
-func TestConfigUsesFixedUpstreamAndRejectsInvalidUpdates(t *testing.T) {
+func TestConfigUpdatesUpstreamAndRejectsInvalidValues(t *testing.T) {
 	store, handler, session, csrf := newAuthenticatedAdmin(t)
 	ctx := context.Background()
 	initial, err := store.GetConfig(ctx, handler.server.FixedUpstreamURL)
@@ -196,9 +196,25 @@ func TestConfigUsesFixedUpstreamAndRejectsInvalidUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	changedUpstream := current
-	changedUpstream.UpstreamURL = "https://attacker.example"
+	changedUpstream.UpstreamURL = "https://new-upstream.example"
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/config", configUpdate(changedUpstream))
-	assertErrorCode(t, rr, http.StatusBadRequest, "upstream_immutable")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("upstream update status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	current, err = store.GetConfig(ctx, handler.server.FixedUpstreamURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.UpstreamURL != changedUpstream.UpstreamURL {
+		t.Fatalf("upstream=%q, want %q", current.UpstreamURL, changedUpstream.UpstreamURL)
+	}
+
+	handler.server.ValidateUpstream = func(*url.URL) error { return errors.New("points to listener") }
+	rejectedUpstream := current
+	rejectedUpstream.UpstreamURL = "http://127.0.0.1:8080"
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/config", configUpdate(rejectedUpstream))
+	assertErrorCode(t, rr, http.StatusBadRequest, "invalid_upstream")
+	handler.server.ValidateUpstream = nil
 
 	invalid := current
 	invalid.ProtectedPaths = []string{"/v1/responses/../messages"}
@@ -209,7 +225,7 @@ func TestConfigUsesFixedUpstreamAndRejectsInvalidUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Version != current.Version || after.UpstreamURL != handler.server.FixedUpstreamURL {
+	if after.Version != current.Version || after.UpstreamURL != current.UpstreamURL {
 		t.Fatalf("rejected config changed state: before=%+v after=%+v", current, after)
 	}
 }
@@ -231,6 +247,16 @@ func TestConfigRequiresExpectedVersionAndRejectsStaleUpdate(t *testing.T) {
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/config", payload)
 	assertErrorCode(t, rr, http.StatusConflict, "version_conflict")
+}
+
+func TestUpdateCenterReportsUnavailableWithoutHostAgent(t *testing.T) {
+	_, handler, session, csrf := newAuthenticatedAdmin(t)
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/system/update", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"available":false`) {
+		t.Fatalf("status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPost, "/api/v1/system/update", map[string]any{"version": "v0.7.0"})
+	assertErrorCode(t, rr, http.StatusServiceUnavailable, "updater_unavailable")
 }
 
 func TestMutationReportsRuntimeReloadFailure(t *testing.T) {

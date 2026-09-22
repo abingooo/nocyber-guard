@@ -28,7 +28,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        VERSION: 0.6.0-e2e
+        VERSION: 0.7.0-e2e
         VCS_REF: compose-e2e
         BUILD_DATE: "1970-01-01T00:00:00Z"
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}

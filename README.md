@@ -2,7 +2,7 @@
 
 NoCyber Guard is a small, transparent instruction-audit gateway for
 Sub2API, New API, and other OpenAI-compatible gateways. It sits in front of an
-upstream and forwards requests unchanged after the audit decision. The v0.5
+upstream and forwards requests unchanged after the audit decision. The v0.7
 default is permissive: only an explicit risk decision blocks a request;
 unknown clients, parse failures, and reviewer outages are recorded and passed
 through. Three independent asynchronous reviewers can now vote after a
@@ -58,6 +58,12 @@ container runs as UID/GID `65532`, has
 no Linux capabilities, and uses a read-only root filesystem. Persist only the
 mounted data directory. Pin a release tag or image digest in production.
 
+`NCG_UPSTREAM_URL` is the bootstrap target for a new data directory. After
+initialization, an authenticated administrator can change the upstream in the
+system settings page. Guard validates the URL and atomically applies it to new
+requests without a container restart; the saved value remains authoritative
+after future restarts.
+
 `NCG_MASTER_KEY` is used to encrypt local secrets. Generate it outside the
 shell history where possible, for example with `openssl rand -hex 32`, and do
 not commit the value. `NCG_MASTER_KEY_FILE` and
@@ -65,7 +71,7 @@ not commit the value. `NCG_MASTER_KEY_FILE` and
 files; do not define the corresponding direct variable, even as an empty
 string, when using file mode. Local Compose file secrets are bind mounts, so
 make their host files owned by UID/GID `65532` with mode `0400`. The initial
-administrator password is consumed on first initialization. v0.5 does not
+administrator password is consumed on first initialization. v0.7 does not
 expose a password-change endpoint; changing it later requires a separately
 controlled offline administration procedure.
 
@@ -93,7 +99,7 @@ any request bytes were sent. Do not add `non_idempotent` or HTTP response
 status codes to that retry policy.
 
 Keep `Upgrade`, `Connection`, `X-Forwarded-*`, request buffering, and long read
-timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.5
+timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.7
 audits the OpenAI Responses HTTP paths listed in `compatibility.json`; it does
 not inspect WebSocket frames or Chat Completions/Messages bodies.
 
@@ -132,6 +138,17 @@ bulk-cleaning all events/events older than a selected date. Linked blocking
 evidence is deleted in the same operation. Trusted and risk rules, AI nodes,
 review jobs, and Guard configuration are never part of event cleanup.
 
+## Online updates
+
+The system settings page can check the latest GitHub release, update the
+running Guard, and roll back to the previous healthy image. This feature uses
+the optional restricted host agent in `deploy/updater`; the Guard container is
+never given the Docker socket. The agent accepts only official
+`ghcr.io/abingooo/nocyber-guard` images, resolves every tag to a pinned digest,
+recreates only the configured Guard service, and automatically restores the
+previous digest if the readiness check fails. See
+`deploy/updater/README.md` for installation and the compose override.
+
 There is no automatic bypass from Guard to the upstream. If Guard is down,
 Nginx returns an error rather than silently bypassing the audit. To recover,
 stop new writes, verify the reason, and manually switch the public proxy back
@@ -140,7 +157,7 @@ blindly switch databases or replay POSTs; reconcile the audit records first.
 
 ## Migrating legacy ModelPort V2 rules
 
-v0.5 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
+v0.7 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
 vault, AI-node credentials, users, or events. The old V2 implementation uses
 platform-specific group/profile scopes and encrypted evidence that cannot be
 copied safely into an independent product.
@@ -155,7 +172,7 @@ accept, print, or store a password or API key. Review and validate the export
 before import, and repeat it immediately before a production cutover.
 
 Because the ModelPort hash tables do not contain reversible instruction text,
-v0.5 skips hash-only migration rows instead of creating new incomplete rules.
+v0.7 skips hash-only migration rows instead of creating new incomplete rules.
 An operator may add an exact `content` value to a reviewed migration row; the
 Guard API verifies it against `sha256` before import. Rules already present in
 an upgraded Guard database remain available and can be backfilled as described

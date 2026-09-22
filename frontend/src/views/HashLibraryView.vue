@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Check,
   Copy,
@@ -183,7 +183,16 @@ async function copyText(value: string, message: string) {
   }
 }
 
-onMounted(load)
+watch(
+  () => props.kind,
+  async () => {
+    entries.value = []
+    selected.value = null
+    dialogOpen.value = false
+    await load()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

@@ -288,7 +288,16 @@ func main() {
 	stopCleanup := rt.startCleanup()
 	defer stopCleanup()
 
-	upstream := cfg.UpstreamURL
+	storedConfig, err := store.GetConfig(ctx, cfg.UpstreamURL.String())
+	if err != nil {
+		logger.Error("proxy_config_error", "error", err)
+		os.Exit(2)
+	}
+	upstream, err := url.Parse(storedConfig.UpstreamURL)
+	if err != nil {
+		logger.Error("proxy_upstream_error", "error", err)
+		os.Exit(2)
+	}
 	public := &proxy.Server{
 		Upstream:     upstream,
 		MaxBody:      cfg.AuditBodyLimit,
@@ -297,13 +306,27 @@ func main() {
 		Ready:        rt.ready,
 		TrustedProxy: func(ip net.IP) bool { return trustedIP(ip, rt.trustedProxies) },
 	}
-	adminServer := &admin.Server{Store: store, Logger: logger, FixedUpstreamURL: cfg.UpstreamURL.String(), SecureCookies: cfg.AdminCookieSecure, StartedAt: time.Now()}
+	adminServer := &admin.Server{Store: store, Logger: logger, FixedUpstreamURL: cfg.UpstreamURL.String(), SecureCookies: cfg.AdminCookieSecure, StartedAt: time.Now(), UpdaterSocket: cfg.UpdaterSocket}
 	adminServer.TestAI = testAIEndpoint
 	adminServer.ValidateAIEndpoint = func(endpoint *url.URL) error {
 		return config.ValidateEndpointAgainstListeners(endpoint, cfg.ListenAddr, cfg.AdminListenAddr)
 	}
+	adminServer.ValidateUpstream = func(endpoint *url.URL) error {
+		return config.ValidateEndpointAgainstListeners(endpoint, cfg.ListenAddr, cfg.AdminListenAddr)
+	}
 	adminServer.OnReload = func(reloadCtx context.Context) error {
-		return rt.reload(reloadCtx, logger)
+		if err := rt.reload(reloadCtx, logger); err != nil {
+			return err
+		}
+		latest, err := store.GetConfig(reloadCtx, cfg.UpstreamURL.String())
+		if err != nil {
+			return err
+		}
+		target, err := url.Parse(latest.UpstreamURL)
+		if err != nil {
+			return err
+		}
+		return public.SetUpstream(target)
 	}
 	dataHTTP := proxy.NewHTTPServer(cfg.ListenAddr, public.Handler())
 	adminHTTP := proxy.NewHTTPServer(cfg.AdminListenAddr, adminServer.Handler())

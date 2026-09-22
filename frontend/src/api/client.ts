@@ -11,6 +11,7 @@ import type {
   LoginResponse,
   Overview,
   PageResult,
+  SystemUpdateStatus,
 } from '@/types'
 
 const API_ROOT = '/api/v1'
@@ -197,6 +198,17 @@ export const api = {
     request<{ ok: boolean; latency_ms?: number; message?: string }>(`/ai-nodes/${encodeURIComponent(node.slot)}/test`, {
       method: 'POST',
       body: JSON.stringify(aiNodeWriteBody(node)),
+    }),
+  getSystemUpdate: () => request<SystemUpdateStatus>('/system/update'),
+  startSystemUpdate: (version: string) =>
+    request<{ state: string; message: string; target_version?: string }>('/system/update', {
+      method: 'POST',
+      body: JSON.stringify({ version }),
+    }),
+  rollbackSystem: () =>
+    request<{ state: string; message: string }>('/system/rollback', {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
 }
 

@@ -12,9 +12,15 @@ export interface Overview {
   audited_requests: number
   blocked_requests: number
   bypassed_requests: number
-  ai_available: boolean
-  ai_latency_ms: number
-  config_version: number
+  ai_configured: boolean
+  ai_model?: string
+  avg_audit_latency_ms: number
+  avg_ai_latency_ms: number
+  audit_latency_samples: number
+  ai_latency_samples: number
+  async_nodes_configured: number
+  async_promotions: number
+  last_event_at?: string
   recent_events: AuditEvent[]
   hourly?: Array<{ hour: string; total: number; blocked: number }>
 }
@@ -131,6 +137,22 @@ export interface AINode {
   has_api_key: boolean
   timeout_ms: number
   enabled: boolean
+}
+
+export interface SystemUpdateStatus {
+  available: boolean
+  state: 'idle' | 'running' | 'succeeded' | 'failed' | string
+  action?: 'update' | 'rollback' | string
+  current_version: string
+  latest_version?: string
+  current_image?: string
+  previous_image?: string
+  rollback_available?: boolean
+  target_version?: string
+  message?: string
+  started_at?: string
+  completed_at?: string
+  latest_error?: string
 }
 
 export interface LoginResponse {

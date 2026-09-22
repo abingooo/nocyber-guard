@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.6.0",
+  "product_version": "0.7.0",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -39,13 +39,13 @@
     {"name": "New API", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"},
     {"name": "CPA", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"}
   ],
-  "not_audited_in_v0_6": [
+  "not_audited_in_v0_7": [
     "/v1/chat/completions",
     "/v1/messages",
     "websocket_message_frames",
     "response_content"
   ],
-  "async_quorum_v0_6": {
+  "async_quorum_v0_7": {
     "configured_nodes": 3,
     "risk_promotion": "2/3 high-confidence reject",
     "trusted_promotion": "2/3 high-confidence pass",
@@ -72,5 +72,11 @@
     "bulk": "authenticated administrators can delete all audit events or events strictly before a selected cutoff; the UI converts local midnight to RFC3339",
     "preserved": ["trusted_hashes", "risk_hashes", "ai_nodes", "review_jobs", "configuration"],
     "storage": "SQLite secure_delete is enabled and a truncating WAL checkpoint is attempted after cleanup"
+  },
+  "admin_console_v0_7": {
+    "navigation": "responsive top navigation",
+    "overview": "SQLite-backed twelve-hour traffic, latency, node configuration, promotions, and recent activity",
+    "upstream": "persisted administrator-managed target applied atomically to new requests",
+    "updates": "restricted host agent over a Unix socket; official repository digests only; automatic health-check rollback"
   }
 }

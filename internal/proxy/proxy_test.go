@@ -1293,6 +1293,30 @@ func TestAllowedProtectedRequestCallsUpstreamExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestSetUpstreamSwitchesNewRequests(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("first")) }))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("second")) }))
+	defer second.Close()
+	firstURL, _ := url.Parse(first.URL)
+	secondURL, _ := url.Parse(second.URL)
+	server := &Server{Upstream: firstURL}
+	handler := server.Handler()
+
+	for index, want := range []string{"first", "second"} {
+		if index == 1 {
+			if err := server.SetUpstream(secondURL); err != nil {
+				t.Fatal(err)
+			}
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://guard.example/ping", nil))
+		if recorder.Code != http.StatusOK || recorder.Body.String() != want {
+			t.Fatalf("request %d = (%d, %q), want (200, %q)", index, recorder.Code, recorder.Body.String(), want)
+		}
+	}
+}
+
 func TestBlockedNeverCallsUpstream(t *testing.T) {
 	var calls atomic.Int64
 	var evaluations atomic.Int64

@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   AlertTriangle,
   Check,
+  Download,
   Eye,
   EyeOff,
   KeyRound,
   Link2,
   LoaderCircle,
   RefreshCw,
+  RotateCcw,
   Save,
   Server,
   ShieldCheck,
@@ -16,7 +18,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { api, ApiError } from '@/api/client'
-import type { AIEndpoint, AINode, GuardConfig } from '@/types'
+import type { AIEndpoint, AINode, GuardConfig, SystemUpdateStatus } from '@/types'
 import { useToast } from '@/composables/toast'
 
 const defaultConfig: GuardConfig = {
@@ -66,6 +68,10 @@ const showKey = ref(false)
 const error = ref('')
 const testResult = ref<{ ok: boolean; message: string; latency?: number } | null>(null)
 const asyncTestResult = ref<Record<string, { ok: boolean; message: string; latency?: number }>>({})
+const updateStatus = ref<SystemUpdateStatus | null>(null)
+const checkingUpdate = ref(false)
+const startingUpdate = ref(false)
+let updatePoll: number | undefined
 const toast = useToast()
 
 const configDirty = computed(() => configSnapshot.value !== serializeConfig(config.value))
@@ -119,7 +125,13 @@ function applyConfig(value: GuardConfig) {
 }
 
 function applyEndpoint(value?: AIEndpoint) {
-  const normalized = { ...defaultEndpoint, ...(value || {}), api_key: '' }
+  const normalized = {
+    ...defaultEndpoint,
+    ...(value || {}),
+    timeout_ms: value?.timeout_ms || defaultEndpoint.timeout_ms,
+    max_concurrency: value?.max_concurrency || defaultEndpoint.max_concurrency,
+    api_key: '',
+  }
   endpoint.value = { ...normalized }
   savedEndpoint.value = { ...normalized }
   endpointSnapshot.value = serializeEndpoint(normalized)
@@ -151,6 +163,11 @@ async function load() {
 }
 
 const asyncNodesDirty = computed(() => asyncNodesSnapshot.value !== serializeNodes(asyncNodes.value))
+const isLatestVersion = computed(() => {
+  const current = updateStatus.value?.current_version?.replace(/^v/, '')
+  const latest = updateStatus.value?.latest_version?.replace(/^v/, '')
+  return Boolean(current && latest && current === latest)
+})
 
 async function saveAsyncNodes() {
   if (asyncNodes.value.some((node) => !node.base_url.trim() || !node.model.trim())) {
@@ -180,9 +197,15 @@ async function testAsyncNode(node: AINode) {
 }
 
 async function saveConfig() {
+  if (!/^https?:\/\/[^\s]+$/i.test(config.value.upstream_url.trim())) {
+    toast.show('请输入有效的 HTTP 或 HTTPS 上游服务地址', { tone: 'error' })
+    return
+  }
   savingConfig.value = true
   try {
-    const saved = await api.updateConfig(cloneConfig(config.value))
+    const next = cloneConfig(config.value)
+    next.upstream_url = next.upstream_url.trim().replace(/\/$/, '')
+    const saved = await api.updateConfig(next)
     applyConfig(saved)
     toast.show('Guard 配置已保存')
   } catch (requestError) {
@@ -254,7 +277,65 @@ function resetAsyncNodes() {
   asyncTestResult.value = {}
 }
 
-onMounted(load)
+function shortImage(value?: string) {
+  if (!value) return '未知'
+  const digest = value.match(/sha256:([a-f0-9]{64})$/)?.[1]
+  return digest ? `sha256:${digest.slice(0, 12)}…${digest.slice(-8)}` : value
+}
+
+async function loadUpdateStatus(silent = false) {
+  if (!silent) checkingUpdate.value = true
+  try {
+    updateStatus.value = await api.getSystemUpdate()
+    if (updateStatus.value.state === 'running') scheduleUpdatePoll()
+  } catch (requestError) {
+    if (!silent) toast.show('无法读取更新状态', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    checkingUpdate.value = false
+  }
+}
+
+function scheduleUpdatePoll() {
+  if (updatePoll) window.clearTimeout(updatePoll)
+  updatePoll = window.setTimeout(async () => {
+    await loadUpdateStatus(true)
+    if (updateStatus.value?.state === 'running') scheduleUpdatePoll()
+  }, 3000)
+}
+
+async function startUpdate() {
+  const target = updateStatus.value?.latest_version
+  if (!target || !window.confirm(`确认将 NoCyber Guard 更新到 ${target}？更新时管理页面会短暂断开。`)) return
+  startingUpdate.value = true
+  try {
+    await api.startSystemUpdate(target)
+    toast.show('更新任务已开始', { detail: '服务会自动做健康检查，失败时自动回滚。' })
+    await loadUpdateStatus(true)
+    scheduleUpdatePoll()
+  } catch (requestError) {
+    toast.show('无法开始更新', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    startingUpdate.value = false
+  }
+}
+
+async function rollbackSystem() {
+  if (!window.confirm('确认回滚到上一个健康镜像？管理页面会短暂断开。')) return
+  startingUpdate.value = true
+  try {
+    await api.rollbackSystem()
+    toast.show('回滚任务已开始')
+    await loadUpdateStatus(true)
+    scheduleUpdatePoll()
+  } catch (requestError) {
+    toast.show('无法开始回滚', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    startingUpdate.value = false
+  }
+}
+
+onMounted(() => { void load(); void loadUpdateStatus() })
+onUnmounted(() => { if (updatePoll) window.clearTimeout(updatePoll) })
 </script>
 
 <template>
@@ -265,7 +346,6 @@ onMounted(load)
         <h1>系统设置</h1>
         <p class="page-subtitle">分别管理 Guard 运行配置与 AI 审核节点。</p>
       </div>
-      <span class="version-chip">配置版本 v{{ config.version }}</span>
     </div>
 
     <div v-if="error" class="error-banner" role="alert">
@@ -308,8 +388,8 @@ onMounted(load)
         <div class="settings-form-grid">
           <label class="field-label span-2" for="upstream-url">
             上游服务地址
-            <input id="upstream-url" v-model="config.upstream_url" type="url" readonly aria-readonly="true" />
-            <span class="field-help">由启动配置 NCG_UPSTREAM_URL 固定，修改后需重启容器。</span>
+            <input id="upstream-url" v-model="config.upstream_url" type="url" placeholder="http://upstream:8080" required />
+            <span class="field-help">保存后立即用于新请求，无需重启容器。请填写 Guard 可访问的完整 HTTP(S) 地址。</span>
           </label>
           <label class="field-label" for="request-timeout">
             审核总超时（毫秒）
@@ -322,7 +402,7 @@ onMounted(load)
           <div class="field-label span-2">
             <span>受保护路径</span>
             <div v-for="protectedPath in config.protected_paths" :key="protectedPath" class="protected-path">
-              <code>{{ protectedPath }}</code><span>v0.3</span>
+              <code>{{ protectedPath }}</code><span>精确匹配</span>
             </div>
             <span class="field-help">其他路径保持透明转发。</span>
           </div>
@@ -347,7 +427,7 @@ onMounted(load)
         <div>
           <span v-if="configDirty" class="unsaved-dot" />
           <strong>{{ configDirty ? 'Guard 配置有未保存的更改' : 'Guard 配置已同步' }}</strong>
-          <small>{{ configDirty ? '保存后新请求立即生效' : `当前为 v${config.version}` }}</small>
+          <small>{{ configDirty ? '保存后新请求立即生效' : '当前配置已生效' }}</small>
         </div>
         <div>
           <button type="button" class="secondary-button" :disabled="!configDirty || savingConfig" @click="resetConfig"><RefreshCw :size="15" />重置</button>
@@ -420,6 +500,30 @@ onMounted(load)
             <button type="button" class="primary-button" :disabled="!asyncNodesDirty || savingAsyncNodes" :aria-busy="savingAsyncNodes" @click="saveAsyncNodes"><LoaderCircle v-if="savingAsyncNodes" class="spin" :size="16" /><Save v-else :size="16" />{{ savingAsyncNodes ? '保存中…' : '保存三个节点' }}</button>
           </div>
         </div>
+      </section>
+
+      <section class="settings-section update-section">
+        <div class="settings-section-title">
+          <div class="section-icon update-icon"><Download :size="19" /></div>
+          <div><h2>软件更新</h2><p>在线检查、升级与健康失败自动回滚</p></div>
+          <button type="button" class="secondary-button section-action" :disabled="checkingUpdate" @click="loadUpdateStatus()"><RefreshCw :size="15" :class="{ spin: checkingUpdate }" />检查更新</button>
+        </div>
+        <div v-if="!updateStatus?.available" class="update-unavailable"><AlertTriangle :size="18" /><div><strong>更新服务未连接</strong><span>当前实例未安装主机更新代理，审核与代理功能不受影响。</span></div></div>
+        <template v-else>
+          <div class="update-grid">
+            <div><span>当前版本</span><strong>{{ updateStatus.current_version || '未知' }}</strong><small>{{ shortImage(updateStatus.current_image) }}</small></div>
+            <div><span>最新版本</span><strong>{{ updateStatus.latest_version || '检查失败' }}</strong><small>{{ updateStatus.latest_error || '来自 GitHub 正式发行版' }}</small></div>
+            <div><span>任务状态</span><strong>{{ updateStatus.state === 'running' ? '执行中' : updateStatus.state === 'failed' ? '上次失败' : updateStatus.state === 'succeeded' ? '上次成功' : '空闲' }}</strong><small>{{ updateStatus.message || '尚未执行更新' }}</small></div>
+          </div>
+          <div v-if="updateStatus.state === 'running'" class="update-progress"><LoaderCircle class="spin" :size="17" /><span>{{ updateStatus.action === 'rollback' ? '正在回滚并等待健康检查…' : `正在更新到 ${updateStatus.target_version || updateStatus.latest_version}…` }}</span></div>
+          <div class="settings-section-footer update-actions">
+            <span>只允许官方 <code>abingooo/nocyber-guard</code> 镜像摘要；升级失败会自动恢复。</span>
+            <div>
+              <button type="button" class="secondary-button" :disabled="!updateStatus.rollback_available || updateStatus.state === 'running' || startingUpdate" @click="rollbackSystem"><RotateCcw :size="15" />回滚上个版本</button>
+              <button type="button" class="primary-button" :disabled="!updateStatus.latest_version || updateStatus.state === 'running' || startingUpdate || isLatestVersion" @click="startUpdate"><Download :size="16" />{{ isLatestVersion ? '已是最新版' : '更新到最新版' }}</button>
+            </div>
+          </div>
+        </template>
       </section>
     </template>
   </section>

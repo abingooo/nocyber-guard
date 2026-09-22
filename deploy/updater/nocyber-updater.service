@@ -1,0 +1,25 @@
+[Unit]
+Description=NoCyber Guard restricted update agent
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/nocyber-updater.env
+ExecStart=/usr/local/bin/nocyber-updater
+Restart=on-failure
+RestartSec=3s
+RuntimeDirectory=nocyber-updater
+RuntimeDirectoryMode=0755
+StateDirectory=nocyber-updater
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/nocyber-guard-main /run/nocyber-updater /var/lib/nocyber-updater
+
+[Install]
+WantedBy=multi-user.target

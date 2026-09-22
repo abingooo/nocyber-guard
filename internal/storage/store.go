@@ -363,11 +363,11 @@ type Config struct {
 func defaultConfig(upstream string) Config {
 	return Config{Version: 1, Enabled: true, Mode: "permissive", UpstreamURL: upstream, ProtectedPaths: []string{"/v1/responses", "/responses", "/backend-api/codex/responses"}, RequestTimeoutMS: 15000, MaxBodyBytes: 4 << 20, EventRetentionDays: 30}
 }
-func (s *Store) GetConfig(ctx context.Context, upstream string) (Config, error) {
+func (s *Store) GetConfig(ctx context.Context, bootstrapUpstream string) (Config, error) {
 	var raw string
 	err := s.db.QueryRowContext(ctx, "SELECT value FROM settings WHERE key='guard_config'").Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		c := defaultConfig(upstream)
+		c := defaultConfig(bootstrapUpstream)
 		return c, s.PutConfig(ctx, c, 0)
 	}
 	if err != nil {
@@ -377,11 +377,10 @@ func (s *Store) GetConfig(ctx context.Context, upstream string) (Config, error) 
 	if err = json.Unmarshal([]byte(raw), &c); err != nil {
 		return Config{}, err
 	}
-	// The proxy target is infrastructure configuration. Never allow a value
-	// persisted by an older build or submitted through the admin API to
-	// override NCG_UPSTREAM_URL.
-	if upstream != "" {
-		c.UpstreamURL = upstream
+	// NCG_UPSTREAM_URL bootstraps new installations. Once the database exists,
+	// the admin-managed target remains authoritative across container restarts.
+	if c.UpstreamURL == "" {
+		c.UpstreamURL = bootstrapUpstream
 	}
 	return c, nil
 }
@@ -422,12 +421,13 @@ func ValidateConfig(c Config) error {
 	if c.Mode != "permissive" {
 		return errors.New("mode must be permissive")
 	}
-	if c.UpstreamURL != "" {
-		u, err := url.Parse(c.UpstreamURL)
-		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
-			u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("upstream URL must be an absolute http or https URL without credentials, query, or fragment")
-		}
+	if strings.TrimSpace(c.UpstreamURL) == "" {
+		return errors.New("upstream URL is required")
+	}
+	u, err := url.Parse(c.UpstreamURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("upstream URL must be an absolute http or https URL without credentials, query, or fragment")
 	}
 	if len(c.ProtectedPaths) == 0 || len(c.ProtectedPaths) > 64 {
 		return errors.New("protected_paths must contain 1 to 64 exact paths")
@@ -1708,7 +1708,7 @@ func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 		out[k] = n
 	}
 	var asyncConfigured int64
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM ai_nodes WHERE enabled=1 AND slot IN ('async_1','async_2','async_3')").Scan(&asyncConfigured); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM ai_nodes WHERE enabled=1 AND length(api_key)>0 AND slot IN ('async_1','async_2','async_3')").Scan(&asyncConfigured); err != nil {
 		return nil, err
 	}
 	out["async_nodes_configured"] = asyncConfigured
@@ -1717,5 +1717,62 @@ func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 		return nil, err
 	}
 	out["async_promotions"] = promotions
+
+	now := time.Now().UTC()
+	firstHour := now.Truncate(time.Hour).Add(-11 * time.Hour)
+	type hourlyPoint struct {
+		Hour    string `json:"hour"`
+		Total   int64  `json:"total"`
+		Blocked int64  `json:"blocked"`
+	}
+	points := make([]hourlyPoint, 12)
+	byHour := make(map[string]*hourlyPoint, len(points))
+	for i := range points {
+		hour := firstHour.Add(time.Duration(i) * time.Hour)
+		points[i] = hourlyPoint{Hour: hour.Format(time.RFC3339)}
+		byHour[hour.Format("2006-01-02T15")] = &points[i]
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT substr(created_at,1,13),count(*),sum(CASE WHEN outcome='block' THEN 1 ELSE 0 END)
+		FROM audit_events WHERE created_at>=? GROUP BY substr(created_at,1,13) ORDER BY substr(created_at,1,13)`, firstHour.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var key string
+		var total, blocked int64
+		if err = rows.Scan(&key, &total, &blocked); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if point := byHour[key]; point != nil {
+			point.Total = total
+			point.Blocked = blocked
+		}
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	out["hourly"] = points
+
+	var avgAudit, avgAI, auditSamples, aiSamples int64
+	if err = s.db.QueryRowContext(ctx, `SELECT
+		COALESCE(CAST(round(avg(CASE WHEN audit_latency_ms>0 THEN audit_latency_ms END)) AS INTEGER),0),
+		COALESCE(CAST(round(avg(CASE WHEN ai_latency_ms>0 THEN ai_latency_ms END)) AS INTEGER),0),
+		count(CASE WHEN action='audit' THEN 1 END),
+		count(CASE WHEN ai_latency_ms>0 THEN 1 END)
+		FROM audit_events WHERE created_at>=?`, firstHour.Format(time.RFC3339Nano)).Scan(&avgAudit, &avgAI, &auditSamples, &aiSamples); err != nil {
+		return nil, err
+	}
+	out["avg_audit_latency_ms"] = avgAudit
+	out["avg_ai_latency_ms"] = avgAI
+	out["audit_latency_samples"] = auditSamples
+	out["ai_latency_samples"] = aiSamples
+	var lastEvent sql.NullString
+	if err = s.db.QueryRowContext(ctx, "SELECT max(created_at) FROM audit_events").Scan(&lastEvent); err != nil {
+		return nil, err
+	}
+	if lastEvent.Valid {
+		out["last_event_at"] = lastEvent.String
+	}
 	return out, nil
 }

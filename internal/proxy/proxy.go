@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,29 @@ type Server struct {
 	MaxBody      int64
 	Ready        func(context.Context) error
 	TrustedProxy func(net.IP) bool
+	upstream     atomic.Pointer[url.URL]
+}
+
+// SetUpstream atomically changes the target used by new requests. Existing
+// in-flight requests keep the URL selected when ReverseProxy rewrote them.
+func (s *Server) SetUpstream(target *url.URL) error {
+	if target == nil || target.Scheme == "" || target.Host == "" {
+		return errors.New("upstream URL is required")
+	}
+	clone := *target
+	s.upstream.Store(&clone)
+	return nil
+}
+
+func (s *Server) currentUpstream() *url.URL {
+	if target := s.upstream.Load(); target != nil {
+		return target
+	}
+	if s.Upstream == nil {
+		return nil
+	}
+	_ = s.SetUpstream(s.Upstream)
+	return s.upstream.Load()
 }
 
 var (
@@ -64,12 +88,17 @@ func (s *Server) Handler() http.Handler {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DisableCompression = true
+	_ = s.SetUpstream(s.Upstream)
 	rp := &httputil.ReverseProxy{Transport: transport,
 		FlushInterval: -1, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			writeUpstreamError(w, r, err)
 		}}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		pr.SetURL(s.Upstream)
+		target := s.currentUpstream()
+		if target == nil {
+			return
+		}
+		pr.SetURL(target)
 		pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 		if len(pr.In.Trailer) > 0 {
 			// Request.Clone copies the trailer map before a streaming body is

@@ -23,13 +23,15 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 FROM go-deps AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG VCS_REF=unknown
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY web/ ./web/
 COPY --from=frontend /src/frontend/dist/ ./web/dist/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/nocyber-guard ./cmd/nocyber-guard
+    go build -trimpath -ldflags="-s -w -X github.com/abingooo/nocyber-guard/internal/buildinfo.Version=$VERSION -X github.com/abingooo/nocyber-guard/internal/buildinfo.Commit=$VCS_REF" -o /out/nocyber-guard ./cmd/nocyber-guard
 
 FROM go-base AS e2e-builder
 COPY .github/e2e/ /e2e-src/

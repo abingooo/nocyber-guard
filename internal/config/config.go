@@ -31,6 +31,7 @@ type Config struct {
 	AITimeout         time.Duration
 	AIQueueTimeout    time.Duration
 	AdminCookieSecure bool
+	UpdaterSocket     string
 }
 
 func Load() (Config, error) {
@@ -67,7 +68,8 @@ func Load() (Config, error) {
 		MasterKey: []byte(master), InitialAdminPass: adminPassword, TrustedProxyCIDRs: proxy,
 		AuditBodyLimit: envInt64("NCG_AUDIT_BODY_LIMIT", 4<<20), AIConcurrency: int(envInt64("NCG_AI_CONCURRENCY", 16)),
 		AITimeout: envDuration("NCG_AI_TIMEOUT", 15*time.Second), AIQueueTimeout: envDuration("NCG_AI_QUEUE_TIMEOUT", 2*time.Second),
-		AdminCookieSecure: strings.EqualFold(os.Getenv("NCG_ADMIN_COOKIE_SECURE"), "true")}, nil
+		AdminCookieSecure: strings.EqualFold(os.Getenv("NCG_ADMIN_COOKIE_SECURE"), "true"),
+		UpdaterSocket:     strings.TrimSpace(os.Getenv("NCG_UPDATER_SOCKET"))}, nil
 }
 
 // ValidateEndpointAgainstListeners rejects endpoints that clearly resolve to
