@@ -235,4 +235,28 @@ describe('API client request policy', () => {
     expect(JSON.parse(String(updateInit.body))).toEqual({ label: 'legacy', enabled: true, content: plaintext })
     expect(new Headers(updateInit.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
+
+  it('deletes individual events and supports bounded or complete cleanup', async () => {
+    document.cookie = 'ncg_csrf=csrf-token; Path=/'
+    const result = { deleted_events: 1, deleted_evidence: 1, wal_truncated: true }
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ data: result }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.deleteEvent(42)
+    await api.deleteEvents('before', '2026-09-01')
+    await api.deleteEvents('all')
+
+    const [singleURL, singleInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(singleURL).toBe('/api/v1/events/42')
+    expect(singleInit.method).toBe('DELETE')
+    expect(new Headers(singleInit.headers).get('X-CSRF-Token')).toBe('csrf-token')
+
+    const [beforeURL, beforeInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(beforeURL).toBe('/api/v1/events')
+    expect(beforeInit.method).toBe('DELETE')
+    expect(JSON.parse(String(beforeInit.body))).toEqual({ scope: 'before', before: '2026-09-01' })
+
+    const [, allInit] = fetchMock.mock.calls[2] as [string, RequestInit]
+    expect(JSON.parse(String(allInit.body))).toEqual({ scope: 'all' })
+  })
 })

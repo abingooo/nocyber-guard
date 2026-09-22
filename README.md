@@ -127,6 +127,11 @@ exposes the same paths. These endpoints are Guard-local and are not forwarded.
 Use the readiness endpoint for container orchestration and keep the public
 gateway health check separate while testing a cutover.
 
+The authenticated administration event page supports deleting one event or
+bulk-cleaning all events/events older than a selected date. Linked blocking
+evidence is deleted in the same operation. Trusted and risk rules, AI nodes,
+review jobs, and Guard configuration are never part of event cleanup.
+
 There is no automatic bypass from Guard to the upstream. If Guard is down,
 Nginx returns an error rather than silently bypassing the audit. To recover,
 stop new writes, verify the reason, and manually switch the public proxy back

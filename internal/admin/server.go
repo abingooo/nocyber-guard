@@ -145,8 +145,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.profileCollection(w, r)
 	case strings.HasPrefix(path, "/client-profiles/"):
 		s.profileItem(w, r, path)
-	case path == "/events" && r.Method == http.MethodGet:
-		s.events(w, r)
+	case path == "/events" && (r.Method == http.MethodGet || r.Method == http.MethodDelete):
+		if r.Method == http.MethodDelete {
+			s.deleteEvents(w, r)
+		} else {
+			s.events(w, r)
+		}
 	case strings.HasPrefix(path, "/events/"):
 		s.eventItem(w, r, path)
 	default:
@@ -714,6 +718,52 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
 }
 
+func (s *Server) deleteEvents(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Scope  string `json:"scope"`
+		Before string `json:"before,omitempty"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	var before *time.Time
+	switch input.Scope {
+	case "all":
+		if input.Before != "" {
+			writeError(w, http.StatusBadRequest, "invalid_event_cleanup", "清空全部事件时不能指定截止日期")
+			return
+		}
+	case "before":
+		parsed, err := parseEventCleanupCutoff(input.Before)
+		if err != nil || parsed.IsZero() {
+			writeError(w, http.StatusBadRequest, "invalid_event_cleanup", "截止时间必须为 YYYY-MM-DD 或 RFC3339")
+			return
+		}
+		before = &parsed
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_event_cleanup", "清理范围必须为 all 或 before")
+		return
+	}
+
+	result, err := s.Store.DeleteEventsBefore(r.Context(), before)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage_error", "清理事件失败")
+		return
+	}
+	if !result.WALTruncated && (result.DeletedEvents > 0 || result.DeletedEvidence > 0) {
+		s.Logger.Warn("event_cleanup_wal_checkpoint_deferred", "deleted_events", result.DeletedEvents, "deleted_evidence", result.DeletedEvidence)
+	}
+	s.Logger.Info("admin_events_deleted", "admin", r.Header.Get("X-NoCyber-Admin"), "scope", input.Scope, "before", input.Before, "deleted_events", result.DeletedEvents, "deleted_evidence", result.DeletedEvidence)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func parseEventCleanupCutoff(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UTC(), nil
+	}
+	return parseEventDate(value)
+}
+
 func parseEventDate(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
@@ -744,6 +794,31 @@ func (s *Server) eventItem(w http.ResponseWriter, r *http.Request, path string) 
 	id, ok := lastID(base)
 	if !ok {
 		writeError(w, 400, "invalid_id", "ID 无效")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if evidence {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		result, err := s.Store.DeleteEvent(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "storage_error", "删除事件失败")
+			return
+		}
+		if result.DeletedEvents == 0 {
+			writeError(w, http.StatusNotFound, "event_not_found", "事件不存在")
+			return
+		}
+		if !result.WALTruncated {
+			s.Logger.Warn("event_delete_wal_checkpoint_deferred", "event_id", id, "deleted_evidence", result.DeletedEvidence)
+		}
+		s.Logger.Info("admin_event_deleted", "admin", r.Header.Get("X-NoCyber-Admin"), "event_id", id, "deleted_evidence", result.DeletedEvidence)
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if evidence {

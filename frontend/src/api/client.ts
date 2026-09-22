@@ -4,6 +4,7 @@ import type {
   ApiEnvelope,
   AuditEvent,
   ClientProfile,
+  EventDeleteResult,
   EventEvidence,
   GuardConfig,
   HashEntry,
@@ -147,6 +148,13 @@ export const api = {
   getEvent: (id: string | number) => request<AuditEvent>(`/events/${encodeURIComponent(id)}`),
   getEventEvidence: (id: string | number) =>
     request<EventEvidence>(`/events/${encodeURIComponent(id)}/evidence`),
+  deleteEvent: (id: string | number) =>
+    request<EventDeleteResult>(`/events/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  deleteEvents: (scope: 'all' | 'before', before?: string) =>
+    request<EventDeleteResult>('/events', {
+      method: 'DELETE',
+      body: JSON.stringify({ scope, ...(scope === 'before' ? { before } : {}) }),
+    }),
 
   listHashes: (kind: 'trusted' | 'risk') => request<HashEntry[]>(`/${kind}-hashes`),
   createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label' | 'content'> & Partial<Pick<HashEntry, 'api_key_fingerprint' | 'api_key_hint'>>) =>

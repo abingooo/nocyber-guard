@@ -375,6 +375,73 @@ func TestEventsDateFiltersAreAppliedAndValidated(t *testing.T) {
 	}
 }
 
+func TestParseEventCleanupCutoffAcceptsBrowserLocalMidnight(t *testing.T) {
+	cutoff, err := parseEventCleanupCutoff("2026-09-22T00:00:00+08:00")
+	if err != nil {
+		t.Fatalf("parseEventCleanupCutoff: %v", err)
+	}
+	want := time.Date(2026, 9, 21, 16, 0, 0, 0, time.UTC)
+	if !cutoff.Equal(want) {
+		t.Fatalf("cutoff = %s, want %s", cutoff, want)
+	}
+	if _, err := parseEventCleanupCutoff("2026-02-30"); err == nil {
+		t.Fatal("invalid cleanup date was accepted")
+	}
+}
+
+func TestAdminCanDeleteSingleAndBulkEvents(t *testing.T) {
+	store, handler, session, csrf := newAuthenticatedAdmin(t)
+	ctx := context.Background()
+	old := audit.Event{
+		RequestID: "admin-cleanup-old", Method: http.MethodPost, Path: "/v1/responses", Protocol: audit.ProtocolResponses,
+		Model: "test", UserAgent: "test", ProfileKey: "other", Decision: "block", Reason: audit.ReasonRiskHashMatch,
+		CreatedAt: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC),
+	}
+	if err := store.RecordBlockedEvent(ctx, old, "instructions", "admin cleanup evidence"); err != nil {
+		t.Fatalf("RecordBlockedEvent: %v", err)
+	}
+	recent := old
+	recent.RequestID = "admin-cleanup-recent"
+	recent.Decision = "allow"
+	recent.Reason = audit.ReasonAIPass
+	recent.CreatedAt = time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	if err := store.RecordAuditEvent(ctx, recent); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+
+	rr := adminRequest(t, handler.Handler(), session, csrf, http.MethodDelete, "/api/v1/events", map[string]any{"scope": "before", "before": "2026-09-10"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bulk delete status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	var deleted storage.EventDeleteResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode bulk delete response: %v", err)
+	}
+	if deleted.DeletedEvents != 1 || deleted.DeletedEvidence != 1 {
+		t.Fatalf("bulk delete response = %+v", deleted)
+	}
+	items, total, err := store.ListEvents(ctx, 1, 20, "", "")
+	if err != nil || total != 1 || len(items) != 1 || items[0].RequestID != recent.RequestID {
+		t.Fatalf("remaining events = (%+v, %d, %v)", items, total, err)
+	}
+
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodDelete, "/api/v1/events/"+strconv.FormatInt(items[0].ID, 10), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("single delete status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodDelete, "/api/v1/events/"+strconv.FormatInt(items[0].ID, 10), nil)
+	assertErrorCode(t, rr, http.StatusNotFound, "event_not_found")
+
+	for _, input := range []map[string]any{
+		{"scope": "before", "before": ""},
+		{"scope": "all", "before": "2026-09-10"},
+		{"scope": "filtered"},
+	} {
+		rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodDelete, "/api/v1/events", input)
+		assertErrorCode(t, rr, http.StatusBadRequest, "invalid_event_cleanup")
+	}
+}
+
 type authenticatedAdmin struct {
 	server *Server
 }

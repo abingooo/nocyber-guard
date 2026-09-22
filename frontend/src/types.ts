@@ -52,6 +52,12 @@ export interface EventEvidence {
   captured_at?: string
 }
 
+export interface EventDeleteResult {
+  deleted_events: number
+  deleted_evidence: number
+  wal_truncated: boolean
+}
+
 export interface PageResult<T> {
   items: T[]
   total: number

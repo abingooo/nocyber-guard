@@ -855,6 +855,62 @@ func TestListEventsFilteredUsesInclusiveFromAndExclusiveTo(t *testing.T) {
 	}
 }
 
+func TestDeleteEventsRemovesEvidenceWithoutTouchingRules(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	if _, err := store.AddHash(ctx, "trusted", strings.Repeat("a", 64), "keep-rule"); err != nil {
+		t.Fatalf("AddHash: %v", err)
+	}
+
+	old := testAuditEvent("cleanup-old", time.Date(2026, 9, 9, 23, 59, 59, 0, time.UTC))
+	old.Decision = "block"
+	old.Reason = audit.ReasonRiskHashMatch
+	if err := store.RecordBlockedEvent(ctx, old, "instructions", "cleanup evidence"); err != nil {
+		t.Fatalf("RecordBlockedEvent: %v", err)
+	}
+	for _, item := range []struct {
+		id string
+		at time.Time
+	}{
+		{"cleanup-boundary", time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)},
+		{"cleanup-new", time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)},
+	} {
+		if err := store.RecordAuditEvent(ctx, testAuditEvent(item.id, item.at)); err != nil {
+			t.Fatalf("RecordAuditEvent(%s): %v", item.id, err)
+		}
+	}
+
+	before := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	deleted, err := store.DeleteEventsBefore(ctx, &before)
+	if err != nil {
+		t.Fatalf("DeleteEventsBefore: %v", err)
+	}
+	if deleted.DeletedEvents != 1 || deleted.DeletedEvidence != 1 {
+		t.Fatalf("DeleteEventsBefore result = %+v, want 1 event and 1 evidence", deleted)
+	}
+	items, total, err := store.ListEvents(ctx, 1, 20, "", "")
+	if err != nil || total != 2 || len(items) != 2 || items[0].RequestID != "cleanup-new" || items[1].RequestID != "cleanup-boundary" {
+		t.Fatalf("remaining events = (%+v, %d, %v)", items, total, err)
+	}
+	var evidenceCount int
+	if err := store.db.QueryRowContext(ctx, "SELECT count(*) FROM blocked_evidence").Scan(&evidenceCount); err != nil || evidenceCount != 0 {
+		t.Fatalf("evidence count = (%d, %v), want 0", evidenceCount, err)
+	}
+
+	boundaryID := items[1].ID
+	deleted, err = store.DeleteEvent(ctx, boundaryID)
+	if err != nil || deleted.DeletedEvents != 1 {
+		t.Fatalf("DeleteEvent = (%+v, %v), want one event", deleted, err)
+	}
+	deleted, err = store.DeleteEventsBefore(ctx, nil)
+	if err != nil || deleted.DeletedEvents != 1 {
+		t.Fatalf("DeleteEventsBefore(all) = (%+v, %v), want one event", deleted, err)
+	}
+	if rules, err := store.ListHashes(ctx, "trusted"); err != nil || len(rules) != 1 || rules[0].Label != "keep-rule" {
+		t.Fatalf("trusted rules changed by event cleanup: (%+v, %v)", rules, err)
+	}
+}
+
 func TestExpiredEvidenceIsNotAdvertisedBeforeCleanup(t *testing.T) {
 	ctx := context.Background()
 	store, _, _ := openTestStore(t)

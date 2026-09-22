@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.5.1",
+  "product_version": "0.6.0",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -39,13 +39,13 @@
     {"name": "New API", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"},
     {"name": "CPA", "status": "compatible_when_responses_paths_are_exposed", "profile": "transparent"}
   ],
-  "not_audited_in_v0_5": [
+  "not_audited_in_v0_6": [
     "/v1/chat/completions",
     "/v1/messages",
     "websocket_message_frames",
     "response_content"
   ],
-  "async_quorum_v0_5": {
+  "async_quorum_v0_6": {
     "configured_nodes": 3,
     "risk_promotion": "2/3 high-confidence reject",
     "trusted_promotion": "2/3 high-confidence pass",
@@ -66,5 +66,11 @@
     "raw_key_storage": "forbidden in events, rules, jobs, logs, responses, and administration APIs",
     "events": "all observable audited and bypass events include trace fields when Authorization is present",
     "rules": "trusted and risk rows keep the first source trace; legacy rows fill it on the next exact match"
+  },
+  "event_cleanup_v0_6": {
+    "single_event": "authenticated administrators can delete one audit event and its linked evidence",
+    "bulk": "authenticated administrators can delete all audit events or events strictly before a selected cutoff; the UI converts local midnight to RFC3339",
+    "preserved": ["trusted_hashes", "risk_hashes", "ai_nodes", "review_jobs", "configuration"],
+    "storage": "SQLite secure_delete is enabled and a truncating WAL checkpoint is attempted after cleanup"
   }
 }

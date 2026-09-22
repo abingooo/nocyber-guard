@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.0 - 2026-09-22
+
+- Added authenticated deletion for individual audit events and bulk cleanup for all events or events before a selected date.
+- Event cleanup atomically removes linked blocking evidence while preserving trusted/risk rules, AI nodes, review jobs, and configuration.
+- Added an administration UI cleanup dialog with explicit scope, irreversible-action warning, deletion counts, and a per-event delete action.
+- Enabled secure SQLite cleanup with a best-effort truncating WAL checkpoint and regression coverage for storage, API, CSRF, and frontend request contracts.
+
 ## v0.5.1 - 2026-09-22
 
 - Reworded the client-facing blocked-request message to: `Your activity may violate our usage policies. Please contact the administrator.`

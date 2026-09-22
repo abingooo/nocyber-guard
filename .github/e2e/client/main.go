@@ -164,7 +164,48 @@ func (s *suite) runPrimary() error {
 	if err := s.checkRiskBlock(); err != nil {
 		return err
 	}
-	return s.checkAuditedFailOpen()
+	if err := s.checkAuditedFailOpen(); err != nil {
+		return err
+	}
+	return s.checkEventCleanup()
+}
+
+func (s *suite) checkEventCleanup() error {
+	response, body, _, err := s.adminJSON(http.MethodGet, "/api/v1/events?page=1&page_size=200", nil)
+	if err != nil || response.StatusCode != http.StatusOK {
+		return fmt.Errorf("event list before cleanup failed: status=%d err=%v", responseStatus(response), err)
+	}
+	var before struct {
+		Items []event `json:"items"`
+		Total int64   `json:"total"`
+	}
+	if json.Unmarshal(body, &before) != nil || before.Total == 0 {
+		return fmt.Errorf("event list before cleanup was empty or invalid: %s", body)
+	}
+
+	response, body, _, err = s.adminJSON(http.MethodDelete, "/api/v1/events", mustJSON(map[string]any{"scope": "all"}))
+	if err != nil || response.StatusCode != http.StatusOK {
+		return fmt.Errorf("event cleanup failed: status=%d err=%v body=%s", responseStatus(response), err, body)
+	}
+	var deleted struct {
+		Events   int64 `json:"deleted_events"`
+		Evidence int64 `json:"deleted_evidence"`
+	}
+	if json.Unmarshal(body, &deleted) != nil || deleted.Events != before.Total || deleted.Evidence == 0 {
+		return fmt.Errorf("event cleanup counts are invalid: before=%d response=%s", before.Total, body)
+	}
+
+	response, body, _, err = s.adminJSON(http.MethodGet, "/api/v1/events?page=1&page_size=20", nil)
+	if err != nil || response.StatusCode != http.StatusOK {
+		return fmt.Errorf("event list after cleanup failed: status=%d err=%v", responseStatus(response), err)
+	}
+	var after struct {
+		Total int64 `json:"total"`
+	}
+	if json.Unmarshal(body, &after) != nil || after.Total != 0 {
+		return fmt.Errorf("events remained after cleanup: %s", body)
+	}
+	return nil
 }
 
 func (s *suite) checkAdminSettings() error {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ChevronLeft, ChevronRight, Copy, Eye, Filter, RefreshCw, Search, ShieldAlert, ShieldCheck, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Copy, Eye, Filter, RefreshCw, Search, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { api, ApiError } from '@/api/client'
 import type { AuditEvent, EventEvidence, PageResult } from '@/types'
 import { useToast } from '@/composables/toast'
@@ -18,7 +18,29 @@ const ruleNotice = ref('')
 const showFilters = ref(false)
 const query = reactive({ search: '', decision: '', from: '', to: '' })
 const page = ref(1)
+const cleanupOpen = ref(false)
+const cleanupMode = ref<'before' | 'all'>('before')
+const cleanupBefore = ref(defaultCleanupDate())
+const cleaning = ref(false)
+const deletingEvent = ref(false)
 const toast = useToast()
+
+function defaultCleanupDate() {
+  const date = new Date()
+  date.setDate(date.getDate() - 30)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function cleanupCutoff(value: string) {
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return ''
+  const date = new Date(year, month - 1, day, 0, 0, 0, 0)
+  if (Number.isNaN(date.getTime()) || date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return ''
+  return date.toISOString()
+}
 
 function formatTime(value: string) {
   const date = new Date(value)
@@ -78,6 +100,48 @@ async function openEvent(event: AuditEvent) {
   }
 }
 function closeDetail() { selected.value = null; evidence.value = null }
+async function deleteSelectedEvent() {
+  const event = selected.value
+  if (!event || !window.confirm(`确定删除事件 #${event.id} 吗？关联审核证据也会一并删除。`)) return
+  deletingEvent.value = true
+  try {
+    const deleted = await api.deleteEvent(event.id)
+    closeDetail()
+    if (result.value.items.length === 1 && page.value > 1) page.value -= 1
+    await load()
+    toast.show(`已删除事件 #${event.id}`, { detail: deleted.deleted_evidence ? `同时删除 ${deleted.deleted_evidence} 条证据` : undefined, tone: 'info' })
+  } catch (requestError) {
+    toast.show('删除事件失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    deletingEvent.value = false
+  }
+}
+async function cleanupEvents() {
+  if (cleanupMode.value === 'before' && !cleanupBefore.value) {
+    toast.show('请选择截止日期', { tone: 'error' })
+    return
+  }
+  cleaning.value = true
+  try {
+    const before = cleanupMode.value === 'before' ? cleanupCutoff(cleanupBefore.value) : undefined
+    if (cleanupMode.value === 'before' && !before) {
+      toast.show('截止日期无效', { tone: 'error' })
+      return
+    }
+    const deleted = await api.deleteEvents(cleanupMode.value, before)
+    cleanupOpen.value = false
+    closeDetail()
+    page.value = 1
+    await load()
+    const evidenceDetail = deleted.deleted_evidence ? `同时删除 ${deleted.deleted_evidence} 条关联证据` : '没有关联证据'
+    const checkpointDetail = deleted.wal_truncated ? evidenceDetail : `${evidenceDetail}；磁盘空间将在后续检查点回收`
+    toast.show(`已清理 ${deleted.deleted_events} 条事件`, { detail: checkpointDetail })
+  } catch (requestError) {
+    toast.show('清理事件失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    cleaning.value = false
+  }
+}
 async function copy(value: string, label: string) {
   try {
     await navigator.clipboard.writeText(value)
@@ -125,6 +189,7 @@ onMounted(load)
       </div>
       <div class="heading-actions">
         <button class="secondary-button" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spin: loading }" />刷新</button>
+        <button class="secondary-button danger-action" @click="cleanupOpen = true"><Trash2 :size="16" />清理事件</button>
         <button class="primary-button" @click="showFilters = !showFilters"><Filter :size="16" />筛选</button>
       </div>
     </div>
@@ -185,7 +250,10 @@ onMounted(load)
       <aside class="detail-drawer">
         <div class="drawer-header">
           <div><p class="eyebrow">EVENT #{{ selected.id }}</p><h2>事件详情</h2></div>
-          <button class="icon-button" aria-label="关闭详情" @click="closeDetail"><X :size="19" /></button>
+          <div class="drawer-header-actions">
+            <button class="icon-button danger-button" :disabled="deletingEvent" title="删除事件" aria-label="删除事件" @click="deleteSelectedEvent"><Trash2 :size="18" /></button>
+            <button class="icon-button" aria-label="关闭详情" @click="closeDetail"><X :size="19" /></button>
+          </div>
         </div>
         <div class="drawer-decision" :class="`decision-${outcomeClass(selected)}`">
           <ShieldAlert v-if="selected.outcome !== 'allow'" :size="21" /><ShieldCheck v-else :size="21" />
@@ -234,6 +302,33 @@ onMounted(load)
           <p v-else class="muted">此事件没有可查看的证据。</p>
         </div>
       </aside>
+    </div>
+
+    <div v-if="cleanupOpen" class="modal-scrim" @click.self="!cleaning && (cleanupOpen = false)">
+      <form class="modal-card cleanup-modal" @submit.prevent="cleanupEvents">
+        <div class="modal-header">
+          <div><p class="eyebrow">EVENT RETENTION</p><h2>清理审核事件</h2></div>
+          <button type="button" class="icon-button" :disabled="cleaning" aria-label="关闭" @click="cleanupOpen = false"><X :size="18" /></button>
+        </div>
+        <p class="cleanup-description">删除事件时会同步删除关联的阻断证据。可信库、风险库、AI 节点和审核配置不会受到影响。</p>
+        <label class="field-label">
+          清理范围
+          <select v-model="cleanupMode" :disabled="cleaning">
+            <option value="before">删除指定日期之前的事件</option>
+            <option value="all">清空全部事件</option>
+          </select>
+        </label>
+        <label v-if="cleanupMode === 'before'" class="field-label cleanup-date">
+          截止日期
+          <input v-model="cleanupBefore" type="date" :disabled="cleaning" />
+          <span class="field-hint">所选日期当天及之后的事件会保留。</span>
+        </label>
+        <div class="cleanup-warning"><ShieldAlert :size="18" /><span><strong>{{ cleanupMode === 'all' ? '全部审核事件将被永久删除' : `${cleanupBefore || '所选日期'}之前的事件将被永久删除` }}</strong><small>此操作不可撤销。</small></span></div>
+        <div class="modal-actions">
+          <button type="button" class="secondary-button" :disabled="cleaning" @click="cleanupOpen = false">取消</button>
+          <button type="submit" class="primary-button destructive-button" :disabled="cleaning || (cleanupMode === 'before' && !cleanupBefore)"><Trash2 :size="16" />{{ cleaning ? '清理中…' : '确认清理' }}</button>
+        </div>
+      </form>
     </div>
   </section>
 </template>

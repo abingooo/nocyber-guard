@@ -958,6 +958,61 @@ func (s *Store) GetEvidence(ctx context.Context, id int64) (Evidence, error) {
 	return e, err
 }
 
+// EventDeleteResult reports exactly what an administrative event cleanup
+// removed. Deleting audit_events cascades to blocked_evidence; rule libraries,
+// review jobs, and configuration are intentionally outside this operation.
+type EventDeleteResult struct {
+	DeletedEvents   int64 `json:"deleted_events"`
+	DeletedEvidence int64 `json:"deleted_evidence"`
+	WALTruncated    bool  `json:"wal_truncated"`
+}
+
+// DeleteEvent removes one audit event and any evidence attached to it.
+func (s *Store) DeleteEvent(ctx context.Context, id int64) (EventDeleteResult, error) {
+	return s.deleteEvents(ctx, "id=?", id)
+}
+
+// DeleteEventsBefore removes all audit events, or only events strictly older
+// than before when it is non-nil. The deletion and evidence count are atomic.
+func (s *Store) DeleteEventsBefore(ctx context.Context, before *time.Time) (EventDeleteResult, error) {
+	if before == nil {
+		return s.deleteEvents(ctx, "1=1")
+	}
+	return s.deleteEvents(ctx, "julianday(created_at) < julianday(?)", before.UTC().Format(time.RFC3339Nano))
+}
+
+func (s *Store) deleteEvents(ctx context.Context, where string, args ...any) (EventDeleteResult, error) {
+	var out EventDeleteResult
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	evidenceQuery := "SELECT count(*) FROM blocked_evidence WHERE event_id IN (SELECT id FROM audit_events WHERE " + where + ")"
+	if err = tx.QueryRowContext(ctx, evidenceQuery, args...).Scan(&out.DeletedEvidence); err != nil {
+		return out, err
+	}
+	res, err := tx.ExecContext(ctx, "DELETE FROM audit_events WHERE "+where, args...)
+	if err != nil {
+		return out, err
+	}
+	if out.DeletedEvents, err = res.RowsAffected(); err != nil {
+		return out, err
+	}
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+
+	// secure_delete is enabled for the connection. Truncating the WAL also
+	// removes committed historical pages when no concurrent reader holds it.
+	var busy, remaining, checkpointed int
+	if err = s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &remaining, &checkpointed); err == nil {
+		out.WALTruncated = busy == 0 && remaining == 0
+	}
+	return out, nil
+}
+
 type ClientMatcher struct {
 	Type          string `json:"type"`
 	Value         string `json:"value"`
