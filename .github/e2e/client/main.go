@@ -513,16 +513,27 @@ func (s *suite) checkRiskBlock() error {
 	digest := sha256.Sum256([]byte(prompt))
 	hash := hex.EncodeToString(digest[:])
 	payload, _ := json.Marshal(map[string]string{"sha256": hash, "label": "compose E2E rule", "content": prompt})
-	response, _, _, err := s.adminJSON(http.MethodPost, "/api/v1/risk-hashes", payload)
+	response, createdBody, _, err := s.adminJSON(http.MethodPost, "/api/v1/risk-hashes", payload)
 	if err != nil {
 		return err
 	}
 	if response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("risk rule creation returned status %d", response.StatusCode)
 	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(createdBody, &created); err != nil || created.ID == 0 {
+		return errors.New("risk rule creation did not return its identifier")
+	}
 	response, rulesBody, _, err := s.adminJSON(http.MethodGet, "/api/v1/risk-hashes", nil)
-	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(rulesBody, []byte(prompt)) {
-		return errors.New("risk rule API did not expose its stored plaintext to the authenticated admin")
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(rulesBody, []byte(prompt)) ||
+		!bytes.Contains(rulesBody, []byte(`"content_available":true`)) {
+		return errors.New("risk rule collection did not return plaintext-free summaries")
+	}
+	response, ruleBody, _, err := s.adminJSON(http.MethodGet, fmt.Sprintf("/api/v1/risk-hashes/%d", created.ID), nil)
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(ruleBody, []byte(prompt)) {
+		return errors.New("risk rule detail did not expose its stored plaintext to the authenticated admin")
 	}
 	before, err := s.stats()
 	if err != nil {
