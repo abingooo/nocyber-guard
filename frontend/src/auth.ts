@@ -4,6 +4,8 @@ import { api, ApiError } from '@/api/client'
 const authenticated = ref(sessionStorage.getItem('nocyber.authenticated') === '1')
 const username = ref(sessionStorage.getItem('nocyber.username') || '管理员')
 let verification: Promise<boolean> | null = null
+let verifiedAt = 0
+const verificationTTL = 60_000
 
 function setSession(value: boolean, user?: string) {
   authenticated.value = value
@@ -12,6 +14,7 @@ function setSession(value: boolean, user?: string) {
     sessionStorage.setItem('nocyber.authenticated', '1')
     sessionStorage.setItem('nocyber.username', username.value)
   } else {
+    verifiedAt = 0
     sessionStorage.removeItem('nocyber.authenticated')
     sessionStorage.removeItem('nocyber.username')
   }
@@ -21,6 +24,7 @@ export function useAuth() {
   async function login(user: string, password: string) {
     const result = await api.login(user, password)
     setSession(true, result?.username || user)
+    verifiedAt = Date.now()
   }
 
   async function logout() {
@@ -33,10 +37,15 @@ export function useAuth() {
 
   async function verify() {
     if (!authenticated.value) return false
+    if (Date.now() - verifiedAt < verificationTTL) return true
     if (!verification) {
       verification = api
-        .getOverview()
-        .then(() => true)
+        .getSession()
+        .then((session) => {
+          setSession(true, session?.username)
+          verifiedAt = Date.now()
+          return true
+        })
         .catch((error: unknown) => {
           if (error instanceof ApiError && error.status === 401) setSession(false)
           return authenticated.value

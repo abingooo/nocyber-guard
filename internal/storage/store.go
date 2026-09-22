@@ -101,7 +101,9 @@ CREATE TABLE IF NOT EXISTS risk_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, sha
 CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL, model TEXT NOT NULL, user_agent TEXT NOT NULL, profile_key TEXT NOT NULL, api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', decision TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'audit', outcome TEXT NOT NULL DEFAULT 'allow', reason TEXT NOT NULL, field_name TEXT NOT NULL, sha256 TEXT NOT NULL, prompt_bytes INTEGER NOT NULL, prompt_runes INTEGER NOT NULL, ai_sampled INTEGER NOT NULL, ai_result TEXT NOT NULL DEFAULT '', ai_confidence REAL NOT NULL DEFAULT 0, ai_reason TEXT NOT NULL DEFAULT '', ai_category TEXT NOT NULL DEFAULT '', latency_ms INTEGER NOT NULL, audit_latency_ms INTEGER NOT NULL DEFAULT 0, ai_latency_ms INTEGER NOT NULL DEFAULT 0, upstream_accessed INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS audit_events_reason_idx ON audit_events(reason);
+CREATE INDEX IF NOT EXISTS audit_events_decision_id_idx ON audit_events(decision,id DESC);
 CREATE TABLE IF NOT EXISTS blocked_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL REFERENCES audit_events(id) ON DELETE CASCADE, field_name TEXT NOT NULL, content TEXT NOT NULL, partial INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS blocked_evidence_event_expiry_idx ON blocked_evidence(event_id,expires_at);
 CREATE TABLE IF NOT EXISTS guard_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS review_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL, field_name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', api_key_fingerprint TEXT NOT NULL DEFAULT '', api_key_hint TEXT NOT NULL DEFAULT '', sampled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', promotion TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sample_ciphertext BLOB NOT NULL DEFAULT '', content_ciphertext BLOB NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS review_jobs_created_idx ON review_jobs(created_at DESC);
@@ -182,7 +184,10 @@ CREATE TABLE IF NOT EXISTS rule_promotions(id INTEGER PRIMARY KEY AUTOINCREMENT,
 			return err
 		}
 	}
-	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", now)
+	if _, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", now); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(6,?)", now)
 	return err
 }
 
@@ -460,6 +465,7 @@ type HashEntry struct {
 	SHA256            string `json:"sha256"`
 	Label             string `json:"label"`
 	Content           string `json:"content"`
+	ContentAvailable  bool   `json:"content_available"`
 	Source            string `json:"source"`
 	APIKeyFingerprint string `json:"api_key_fingerprint"`
 	APIKeyHint        string `json:"api_key_hint"`
@@ -551,9 +557,53 @@ func (s *Store) ListHashes(ctx context.Context, kind string) ([]HashEntry, error
 			return nil, err
 		}
 		x.Enabled = en != 0
+		x.ContentAvailable = x.Content != ""
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+// ListHashSummaries deliberately excludes plaintext. Rule bodies can be up to
+// 64 MiB and are fetched only when an administrator opens one rule.
+func (s *Store) ListHashSummaries(ctx context.Context, kind string) ([]HashEntry, error) {
+	table := "trusted_hashes"
+	if kind == "risk" {
+		table = "risk_hashes"
+	} else if kind != "trusted" {
+		return nil, errors.New("invalid hash kind")
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT id,sha256,label,length(content)>0,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" ORDER BY id DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HashEntry{}
+	for rows.Next() {
+		var item HashEntry
+		var contentAvailable, enabled int
+		if err = rows.Scan(&item.ID, &item.SHA256, &item.Label, &contentAvailable, &item.Source, &item.APIKeyFingerprint, &item.APIKeyHint, &item.APIKeySeenAt, &enabled, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.ContentAvailable = contentAvailable != 0
+		item.Enabled = enabled != 0
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetHash(ctx context.Context, kind string, id int64) (HashEntry, error) {
+	table := "trusted_hashes"
+	if kind == "risk" {
+		table = "risk_hashes"
+	} else if kind != "trusted" {
+		return HashEntry{}, errors.New("invalid hash kind")
+	}
+	var item HashEntry
+	var enabled int
+	err := s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" WHERE id=?", id).Scan(&item.ID, &item.SHA256, &item.Label, &item.Content, &item.Source, &item.APIKeyFingerprint, &item.APIKeyHint, &item.APIKeySeenAt, &enabled, &item.CreatedAt)
+	item.Enabled = enabled != 0
+	item.ContentAvailable = item.Content != ""
+	return item, err
 }
 func (s *Store) AddHash(ctx context.Context, kind, h, label string) (HashEntry, error) {
 	return s.AddHashSourceWithContent(ctx, kind, h, label, "", "manual")
@@ -612,6 +662,7 @@ func (s *Store) AddHashSourceWithTrace(ctx context.Context, kind, h, label, cont
 	var en int
 	err = s.db.QueryRowContext(ctx, "SELECT id,sha256,label,content,source,api_key_fingerprint,api_key_hint,api_key_seen_at,enabled,created_at FROM "+table+" WHERE sha256=?", strings.ToLower(h)).Scan(&x.ID, &x.SHA256, &x.Label, &x.Content, &x.Source, &x.APIKeyFingerprint, &x.APIKeyHint, &x.APIKeySeenAt, &en, &x.CreatedAt)
 	x.Enabled = en != 0
+	x.ContentAvailable = x.Content != ""
 	return x, err
 }
 
@@ -665,6 +716,7 @@ func (s *Store) UpdateHashWithContent(ctx context.Context, kind string, id int64
 		return HashEntry{}, err
 	}
 	item.Enabled = en != 0
+	item.ContentAvailable = item.Content != ""
 	return item, nil
 }
 
@@ -881,6 +933,29 @@ type EventFilter struct {
 
 func (s *Store) ListEvents(ctx context.Context, page, size int, decision, query string) ([]Event, int64, error) {
 	return s.ListEventsFiltered(ctx, page, size, EventFilter{Decision: decision, Query: query})
+}
+
+// ListRecentEvents is the overview fast path. It does not calculate a total,
+// because the overview already obtains that value in its aggregate query.
+func (s *Store) ListRecentEvents(ctx context.Context, limit int) ([]Event, error) {
+	if limit < 1 || limit > 100 {
+		limit = 8
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events ORDER BY id DESC LIMIT ?", time.Now().UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Event, 0, limit)
+	for rows.Next() {
+		var event Event
+		if err = rows.Scan(&event.ID, &event.RequestID, &event.CreatedAt, &event.Path, &event.Decision, &event.Action, &event.Outcome, &event.Reason, &event.FieldName, &event.ClientProfile, &event.UserAgent, &event.Model, &event.APIKeyFingerprint, &event.APIKeyHint, &event.PromptSHA256, &event.AIResult, &event.AIConfidence, &event.AuditLatencyMS, &event.AILatencyMS, &event.UpstreamAccessed, &event.EvidenceAvailable); err != nil {
+			return nil, err
+		}
+		event.LatencyMS = event.AuditLatencyMS
+		out = append(out, event)
+	}
+	return out, rows.Err()
 }
 
 // ListEventsFiltered lists events with optional decision, text, and time
@@ -1700,12 +1775,21 @@ func (s *Store) Cleanup(ctx context.Context, eventDays int) error {
 }
 func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 	out := map[string]any{}
-	for k, q := range map[string]string{"total_requests": "SELECT count(*) FROM audit_events", "blocked_requests": "SELECT count(*) FROM audit_events WHERE outcome='block'", "audited_requests": "SELECT count(*) FROM audit_events WHERE action='audit'", "bypassed_requests": "SELECT count(*) FROM audit_events WHERE action='bypass'"} {
-		var n int64
-		if err := s.db.QueryRowContext(ctx, q).Scan(&n); err != nil {
-			return nil, err
-		}
-		out[k] = n
+	var total, blocked, audited, bypassed int64
+	var lastEvent sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*),
+		COALESCE(sum(CASE WHEN outcome='block' THEN 1 ELSE 0 END),0),
+		COALESCE(sum(CASE WHEN action='audit' THEN 1 ELSE 0 END),0),
+		COALESCE(sum(CASE WHEN action='bypass' THEN 1 ELSE 0 END),0),
+		max(created_at) FROM audit_events`).Scan(&total, &blocked, &audited, &bypassed, &lastEvent); err != nil {
+		return nil, err
+	}
+	out["total_requests"] = total
+	out["blocked_requests"] = blocked
+	out["audited_requests"] = audited
+	out["bypassed_requests"] = bypassed
+	if lastEvent.Valid {
+		out["last_event_at"] = lastEvent.String
 	}
 	var asyncConfigured int64
 	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM ai_nodes WHERE enabled=1 AND length(api_key)>0 AND slot IN ('async_1','async_2','async_3')").Scan(&asyncConfigured); err != nil {
@@ -1767,12 +1851,5 @@ func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 	out["avg_ai_latency_ms"] = avgAI
 	out["audit_latency_samples"] = auditSamples
 	out["ai_latency_samples"] = aiSamples
-	var lastEvent sql.NullString
-	if err = s.db.QueryRowContext(ctx, "SELECT max(created_at) FROM audit_events").Scan(&lastEvent); err != nil {
-		return nil, err
-	}
-	if lastEvent.Valid {
-		out["last_event_at"] = lastEvent.String
-	}
 	return out, nil
 }

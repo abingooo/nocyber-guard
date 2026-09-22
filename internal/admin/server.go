@@ -121,6 +121,8 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1")
 	switch {
+	case path == "/auth/session" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]string{"username": r.Header.Get("X-NoCyber-Admin")})
 	case path == "/auth/logout" && r.Method == http.MethodPost:
 		s.logout(w, r)
 	case path == "/overview" && r.Method == http.MethodGet:
@@ -274,7 +276,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	endpoint, _ := s.Store.GetAIEndpoint(r.Context())
 	counts["ai_configured"] = endpoint.BaseURL != "" && endpoint.Model != "" && endpoint.HasAPIKey
 	counts["ai_model"] = endpoint.Model
-	items, _, _ := s.Store.ListEvents(r.Context(), 1, 8, "", "")
+	items, _ := s.Store.ListRecentEvents(r.Context(), 8)
 	counts["recent_events"] = items
 	writeJSON(w, 200, counts)
 }
@@ -619,7 +621,7 @@ func (s *Server) hashCollection(w http.ResponseWriter, r *http.Request, path str
 	}
 	switch r.Method {
 	case http.MethodGet:
-		items, err := s.Store.ListHashes(r.Context(), kind)
+		items, err := s.Store.ListHashSummaries(r.Context(), kind)
 		if err != nil {
 			writeError(w, 500, "storage_error", "读取规则失败")
 			return
@@ -664,6 +666,17 @@ func (s *Server) hashItem(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	switch r.Method {
+	case http.MethodGet:
+		item, err := s.Store.GetHash(r.Context(), kind, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 404, "hash_not_found", "规则不存在")
+			return
+		}
+		if err != nil {
+			writeError(w, 500, "storage_error", "读取规则失败")
+			return
+		}
+		writeJSON(w, 200, item)
 	case http.MethodPut:
 		var input struct {
 			Label   string  `json:"label"`

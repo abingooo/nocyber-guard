@@ -76,6 +76,7 @@ export interface HashEntry {
   sha256: string
   label: string
   content: string
+  content_available?: boolean
   source?: string
   api_key_fingerprint?: string
   api_key_hint?: string

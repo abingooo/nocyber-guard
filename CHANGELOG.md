@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.1 - 2026-09-22
+
+- Replaced route-wide overview verification with a lightweight, cached session check so navigation no longer waits for dashboard aggregation.
+- Reduced overview database work to one all-time aggregate scan and removed the redundant event count used for recent activity.
+- Changed rule-library lists to return metadata only; plaintext is loaded on demand from an authenticated detail endpoint.
+- Added event decision/evidence indexes and stale-response guards for event and rule-library navigation.
+
 ## v0.7.0 - 2026-09-22
 
 - Replaced the desktop sidebar with a compact responsive top navigation and added the NoCyber shield favicon.

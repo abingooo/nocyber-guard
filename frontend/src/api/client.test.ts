@@ -45,6 +45,19 @@ describe('API client request policy', () => {
     expect(JSON.parse(String(init.body))).toEqual({ username: 'abin', password: 'secret' })
   })
 
+  it('uses lightweight session verification and a separate rule-detail request', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ username: 'admin' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 12, content: 'plaintext', content_available: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.getSession()
+    await api.getHash('risk', 12)
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/auth/session')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v1/risk-hashes/12')
+  })
+
   it('adds the decoded CSRF cookie to non-login writes', async () => {
     document.cookie = 'ncg_csrf=csrf%20token; Path=/'
     const config: GuardConfig = {

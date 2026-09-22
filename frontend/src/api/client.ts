@@ -134,6 +134,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
+  getSession: () => request<LoginResponse>('/auth/session'),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
 
   getOverview: () => request<Overview>('/overview'),
@@ -158,6 +159,8 @@ export const api = {
     }),
 
   listHashes: (kind: 'trusted' | 'risk') => request<HashEntry[]>(`/${kind}-hashes`),
+  getHash: (kind: 'trusted' | 'risk', id: string | number) =>
+    request<HashEntry>(`/${kind}-hashes/${encodeURIComponent(id)}`),
   createHash: (kind: 'trusted' | 'risk', body: Pick<HashEntry, 'sha256' | 'label' | 'content'> & Partial<Pick<HashEntry, 'api_key_fingerprint' | 'api_key_hint'>>) =>
     request<HashEntry>(`/${kind}-hashes`, { method: 'POST', body: JSON.stringify(body) }),
   updateHash: (kind: 'trusted' | 'risk', id: string | number, body: Pick<HashEntry, 'label' | 'enabled'> & { content?: string }) =>

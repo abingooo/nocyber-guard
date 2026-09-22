@@ -15,6 +15,7 @@ const ruleContent = ref('')
 const addingRule = ref<'trusted' | 'risk' | null>(null)
 const ruleError = ref('')
 const ruleNotice = ref('')
+let loadGeneration = 0
 const showFilters = ref(false)
 const query = reactive({ search: '', decision: '', from: '', to: '' })
 const page = ref(1)
@@ -65,14 +66,18 @@ function keyTrace(event: AuditEvent) {
 }
 
 async function load() {
+  const generation = ++loadGeneration
   loading.value = true
   error.value = ''
   try {
-    result.value = await api.listEvents({ page: page.value, page_size: 20, query: query.search, decision: query.decision, from: query.from, to: query.to })
+    const loaded = await api.listEvents({ page: page.value, page_size: 20, query: query.search, decision: query.decision, from: query.from, to: query.to })
+    if (generation === loadGeneration) result.value = loaded
   } catch (requestError) {
-    error.value = requestError instanceof ApiError ? requestError.message : '无法加载审核事件'
+    if (generation === loadGeneration) {
+      error.value = requestError instanceof ApiError ? requestError.message : '无法加载审核事件'
+    }
   } finally {
-    loading.value = false
+    if (generation === loadGeneration) loading.value = false
   }
 }
 function applyFilters() { page.value = 1; void load(); showFilters.value = false }

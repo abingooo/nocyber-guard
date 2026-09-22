@@ -48,6 +48,9 @@ func TestOpenIsIdempotentAndDataSurvivesRestart(t *testing.T) {
 	if err := second.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version=5").Scan(&migrationCount); err != nil || migrationCount != 1 {
 		t.Fatalf("key-trace migration count = (%d, %v), want (1, nil)", migrationCount, err)
 	}
+	if err := second.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version=6").Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("performance-index migration count = (%d, %v), want (1, nil)", migrationCount, err)
+	}
 
 	cfg, err := first.GetConfig(ctx, "http://initial-upstream.example")
 	if err != nil {
@@ -145,6 +148,25 @@ func TestHashContextStoresOnlyFirstMaskedKeyTrace(t *testing.T) {
 	}
 	if entries[0].APIKeyFingerprint != firstFingerprint || entries[0].APIKeyHint != "sk-…A7F2" || entries[0].APIKeySeenAt == "" {
 		t.Fatalf("stored key trace = %+v, want first source", entries[0])
+	}
+}
+
+func TestHashSummariesExcludePlaintextAndDetailLoadsIt(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	content := strings.Repeat("large rule body ", 1024)
+	hash := hashPlaintext(content)
+	created, err := store.AddHashWithContent(ctx, "trusted", hash, "large rule", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := store.ListHashSummaries(ctx, "trusted")
+	if err != nil || len(summaries) != 1 || summaries[0].Content != "" || !summaries[0].ContentAvailable {
+		t.Fatalf("summaries = (%+v, %v)", summaries, err)
+	}
+	detail, err := store.GetHash(ctx, "trusted", created.ID)
+	if err != nil || detail.Content != content || !detail.ContentAvailable {
+		t.Fatalf("detail = (%+v, %v)", detail, err)
 	}
 }
 
@@ -959,6 +981,10 @@ func TestOverviewUsesRecordedHourlyAndLatencyData(t *testing.T) {
 	}
 	if got := reflect.ValueOf(stats["hourly"]).Len(); got != 12 {
 		t.Fatalf("hourly buckets = %d, want 12", got)
+	}
+	recent, err := store.ListRecentEvents(ctx, 8)
+	if err != nil || len(recent) != 1 || recent[0].RequestID != event.RequestID {
+		t.Fatalf("recent events = (%+v, %v)", recent, err)
 	}
 }
 

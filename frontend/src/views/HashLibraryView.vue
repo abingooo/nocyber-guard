@@ -30,7 +30,11 @@ const form = ref({ sha256: '', label: '', content: '' })
 const selected = ref<HashEntry | null>(null)
 const contentDraft = ref('')
 const contentSaving = ref(false)
+const contentLoading = ref(false)
+const contentLoadError = ref('')
 const toast = useToast()
+let loadGeneration = 0
+let contentGeneration = 0
 const isRisk = computed(() => props.kind === 'risk')
 const title = computed(() => (isRisk.value ? '风险库' : '可信库'))
 const description = computed(() =>
@@ -52,14 +56,19 @@ function formatTime(value: string) {
 }
 
 async function load() {
+  const generation = ++loadGeneration
+  const kind = props.kind
   loading.value = true
   error.value = ''
   try {
-    entries.value = await api.listHashes(props.kind)
+    const loaded = await api.listHashes(kind)
+    if (generation === loadGeneration && kind === props.kind) entries.value = loaded
   } catch (requestError) {
-    error.value = requestError instanceof ApiError ? requestError.message : '无法加载规则库'
+    if (generation === loadGeneration) {
+      error.value = requestError instanceof ApiError ? requestError.message : '无法加载规则库'
+    }
   } finally {
-    loading.value = false
+    if (generation === loadGeneration) loading.value = false
   }
 }
 
@@ -104,13 +113,34 @@ async function create() {
   }
 }
 
-function openContent(entry: HashEntry) {
-  selected.value = entry
+async function openContent(entry: HashEntry) {
+  const generation = ++contentGeneration
+  const kind = props.kind
+  selected.value = { ...entry }
   contentDraft.value = entry.content || ''
+  contentLoadError.value = ''
+  if (!entry.content_available || entry.content) return
+  contentLoading.value = true
+  try {
+    const detail = await api.getHash(kind, entry.id)
+    if (generation !== contentGeneration || kind !== props.kind || selected.value?.id !== entry.id) return
+    selected.value = detail
+    contentDraft.value = detail.content || ''
+  } catch (requestError) {
+    if (generation === contentGeneration) {
+      contentLoadError.value = requestError instanceof ApiError ? requestError.message : '无法读取规则原文'
+    }
+  } finally {
+    if (generation === contentGeneration) contentLoading.value = false
+  }
 }
 
 function closeContent() {
-  if (!contentSaving.value) selected.value = null
+  if (!contentSaving.value) {
+    contentGeneration += 1
+    contentLoading.value = false
+    selected.value = null
+  }
 }
 
 async function backfillContent() {
@@ -128,6 +158,8 @@ async function backfillContent() {
       content: contentDraft.value,
     })
     Object.assign(entry, updated)
+    const summary = entries.value.find((item) => item.id === entry.id)
+    if (summary) summary.content_available = true
     contentDraft.value = updated.content
     toast.show('原文已补录')
   } catch (requestError) {
@@ -186,6 +218,8 @@ async function copyText(value: string, message: string) {
 watch(
   () => props.kind,
   async () => {
+    loadGeneration += 1
+    contentGeneration += 1
     entries.value = []
     selected.value = null
     dialogOpen.value = false
@@ -259,9 +293,9 @@ watch(
               </td>
               <td>
                 <button class="text-button rule-content-button" @click="openContent(entry)">
-                  <Eye v-if="entry.content" :size="15" />
+                  <Eye v-if="entry.content_available" :size="15" />
                   <FilePlus2 v-else :size="15" />
-                  {{ entry.content ? '查看原文' : '补录原文' }}
+                  {{ entry.content_available ? '查看原文' : '补录原文' }}
                 </button>
               </td>
               <td>{{ entry.source || '管理员添加' }}</td>
@@ -337,11 +371,16 @@ watch(
           <strong>{{ keyTrace(selected) }}</strong>
           <button v-if="selected.api_key_fingerprint" class="text-button" @click="copyText(selected.api_key_fingerprint, 'Key 指纹已复制')"><Copy :size="14" />复制指纹</button>
         </div>
-        <div v-if="selected.content" class="evidence-box rule-content-preview">
+        <div v-if="contentLoading" class="loading-state compact"><span class="loader" />正在读取原文…</div>
+        <div v-else-if="contentLoadError" class="error-banner">
+          <ShieldAlert :size="17" />{{ contentLoadError }}
+          <button class="text-button" @click="openContent(selected)">重试</button>
+        </div>
+        <div v-else-if="selected.content" class="evidence-box rule-content-preview">
           <div class="evidence-meta"><span>完整原文</span><span>{{ selected.content.length }} 字符</span></div>
           <pre>{{ selected.content }}</pre>
         </div>
-        <template v-else>
+        <template v-else-if="!contentLoadError">
           <div class="warning-banner">
             <ShieldAlert :size="17" />此历史规则创建时只保存了 Hash。粘贴原文后会校验 SHA-256 并永久保存。
           </div>
@@ -350,7 +389,7 @@ watch(
             <textarea id="backfill-content" v-model="contentDraft" rows="12" placeholder="粘贴与该 Hash 对应的完整原文" />
           </label>
         </template>
-        <div class="modal-actions">
+        <div v-if="!contentLoading && !contentLoadError" class="modal-actions">
           <button v-if="selected.content" class="secondary-button" @click="copyText(selected.content, '原文已复制')">
             <Copy :size="15" />复制原文
           </button>

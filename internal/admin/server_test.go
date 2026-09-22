@@ -291,8 +291,17 @@ func TestHashCRUD(t *testing.T) {
 		t.Fatalf("created hash plaintext = %+v", created)
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/risk-hashes", nil)
-	if rr.Code != http.StatusOK || !bytes.Contains(rr.Body.Bytes(), []byte("风险规则原文")) {
-		t.Fatalf("list plaintext status=%d body=%q", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK || bytes.Contains(rr.Body.Bytes(), []byte("风险规则原文")) {
+		t.Fatalf("list must exclude plaintext status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	var summaries []storage.HashEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &summaries); err != nil || len(summaries) != 1 || summaries[0].Content != "" || !summaries[0].ContentAvailable {
+		t.Fatalf("hash summaries = (%+v, %v)", summaries, err)
+	}
+	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodGet, "/api/v1/risk-hashes/"+strconv.FormatInt(created.ID, 10), nil)
+	var detail storage.HashEntry
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &detail) != nil || detail.Content != content || !detail.ContentAvailable {
+		t.Fatalf("hash detail status=%d item=%+v body=%q", rr.Code, detail, rr.Body.String())
 	}
 	rr = adminRequest(t, handler.Handler(), session, csrf, http.MethodPut, "/api/v1/risk-hashes/"+strconv.FormatInt(created.ID, 10), map[string]any{"label": "after", "enabled": false})
 	if rr.Code != http.StatusOK {
@@ -341,6 +350,11 @@ func TestAdminAPIRequiresSessionAndCSRF(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil))
 	assertErrorCode(t, rr, http.StatusUnauthorized, "unauthorized")
+
+	rr = adminRequest(t, h, session, "", http.MethodGet, "/api/v1/auth/session", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"username":"admin"`) {
+		t.Fatalf("session status=%d body=%q", rr.Code, rr.Body.String())
+	}
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
