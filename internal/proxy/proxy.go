@@ -379,7 +379,7 @@ func writeBlocked(w http.ResponseWriter, d Decision) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusForbidden)
-	_, _ = io.WriteString(w, `{"error":{"message":"Request blocked by NoCyber Guard","type":"invalid_request_error","code":"nocyber_guard_blocked"}}`)
+	_, _ = io.WriteString(w, `{"error":{"message":"Your activity may violate our usage policies. Please contact the administrator.","type":"invalid_request_error","code":"nocyber_guard_blocked"}}`)
 }
 
 func writeUpstreamError(w http.ResponseWriter, r *http.Request, err error) {

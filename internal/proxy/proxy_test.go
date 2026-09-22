@@ -1305,7 +1305,8 @@ func TestBlockedNeverCallsUpstream(t *testing.T) {
 	})}).Handler()
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "http://guard/v1/responses", strings.NewReader(`{"instructions":"x"}`)))
-	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "nocyber_guard_blocked") {
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "nocyber_guard_blocked") ||
+		!strings.Contains(rr.Body.String(), "Your activity may violate our usage policies. Please contact the administrator.") {
 		t.Fatalf("unexpected block: %d %s", rr.Code, rr.Body.String())
 	}
 	if calls.Load() != 0 {

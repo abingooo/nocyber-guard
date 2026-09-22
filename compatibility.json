@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.5.0",
+  "product_version": "0.5.1",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [

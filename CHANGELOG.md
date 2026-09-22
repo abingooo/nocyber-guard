@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.1 - 2026-09-22
+
+- Reworded the client-facing blocked-request message to: `Your activity may violate our usage policies. Please contact the administrator.`
+- Kept the HTTP 403 status, OpenAI-compatible error envelope, and stable `nocyber_guard_blocked` code unchanged.
+
 ## v0.5.0 - 2026-09-21
 
 - Added an instance-local HMAC fingerprint and strictly masked hint for request API keys without persisting raw credentials.
