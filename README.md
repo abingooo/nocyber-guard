@@ -2,7 +2,7 @@
 
 NoCyber Guard is a small, transparent instruction-audit gateway for
 Sub2API, New API, and other OpenAI-compatible gateways. It sits in front of an
-upstream and forwards requests unchanged after the audit decision. The v0.7
+upstream and forwards requests unchanged after the audit decision. The v0.8
 default is permissive: only an explicit risk decision blocks a request;
 unknown clients, parse failures, and reviewer outages are recorded and passed
 through. Three independent asynchronous reviewers can now vote after a
@@ -39,7 +39,45 @@ matches. Request traffic never overwrites plaintext that is already present.
 Plaintext is intentionally excluded from ordinary event rows and application
 logs.
 
-## Quick start
+## Interactive installer
+
+The supported installer keeps both listeners on host loopback, stores the
+master key and initial administrator password in UID-65532-readable secret
+files instead of `.env`, pins the selected release image by digest, and
+refuses to overwrite an existing installation. Download and inspect it before
+running it as root:
+
+```sh
+curl -fL https://github.com/abingooo/nocyber-guard/releases/latest/download/nocyber-install.sh \
+  -o nocyber-install.sh
+less nocyber-install.sh
+sudo bash nocyber-install.sh
+```
+
+The wizard can connect Guard to an existing gateway container or a reachable
+HTTP(S) upstream, generate an administrator password, install the restricted
+host updater, and either generate or safely apply a Caddy/Nginx site. It never
+replaces an existing site for the requested domain. Nginx installation is
+HTTP-only so certificate issuance remains an explicit operator step; Caddy
+uses its normal automatic HTTPS behavior.
+
+For automation, use `--non-interactive` and explicit environment values:
+
+```sh
+sudo env \
+  NCG_INSTALL_UPSTREAM_URL=http://host.docker.internal:8080 \
+  NCG_INSTALL_ADMIN_PASSWORD='replace-with-a-long-password' \
+  NCG_INSTALL_NETWORK_NAME=nocyber-guard \
+  NCG_INSTALL_WITH_UPDATER=1 \
+  bash nocyber-install.sh --non-interactive --yes
+```
+
+The installer is for a fresh, single-instance deployment. It deliberately
+stops when its install directory, container name, or host ports are already in
+use. Existing installations continue to use the administration update center
+or the manual upgrade runbook.
+
+## Manual quick start
 
 ```sh
 # Choose a verified server profile (this example is for ZeusA).
@@ -71,7 +109,7 @@ not commit the value. `NCG_MASTER_KEY_FILE` and
 files; do not define the corresponding direct variable, even as an empty
 string, when using file mode. Local Compose file secrets are bind mounts, so
 make their host files owned by UID/GID `65532` with mode `0400`. The initial
-administrator password is consumed on first initialization. v0.7 does not
+administrator password is consumed on first initialization. v0.8 does not
 expose a password-change endpoint; changing it later requires a separately
 controlled offline administration procedure.
 
@@ -99,7 +137,7 @@ any request bytes were sent. Do not add `non_idempotent` or HTTP response
 status codes to that retry policy.
 
 Keep `Upgrade`, `Connection`, `X-Forwarded-*`, request buffering, and long read
-timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.7
+timeouts as shown so SSE and WebSocket handshakes remain compatible. v0.8
 audits the OpenAI Responses HTTP paths listed in `compatibility.json`; it does
 not inspect WebSocket frames or Chat Completions/Messages bodies.
 
@@ -157,7 +195,7 @@ blindly switch databases or replay POSTs; reconcile the audit records first.
 
 ## Migrating legacy ModelPort V2 rules
 
-v0.7 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
+v0.8 intentionally does **not** import ModelPort's PostgreSQL schema, evidence
 vault, AI-node credentials, users, or events. The old V2 implementation uses
 platform-specific group/profile scopes and encrypted evidence that cannot be
 copied safely into an independent product.
@@ -172,7 +210,7 @@ accept, print, or store a password or API key. Review and validate the export
 before import, and repeat it immediately before a production cutover.
 
 Because the ModelPort hash tables do not contain reversible instruction text,
-v0.7 skips hash-only migration rows instead of creating new incomplete rules.
+v0.8 skips hash-only migration rows instead of creating new incomplete rules.
 An operator may add an exact `content` value to a reviewed migration row; the
 Guard API verifies it against `sha256` before import. Rules already present in
 an upgraded Guard database remain available and can be backfilled as described

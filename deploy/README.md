@@ -1,5 +1,19 @@
 # Deployment runbook
 
+## Interactive fresh install
+
+For a new single-instance host, the release asset `nocyber-install.sh`
+provides the preferred guided path. It validates Linux, root access, Docker
+Engine and Compose v2; selects or creates a user-defined Docker network;
+stores secrets outside `.env`; pins the official multi-architecture image by
+digest; waits for both readiness endpoints; and optionally installs the
+restricted updater and a conflict-checked Caddy/Nginx site.
+
+The installer never overwrites a non-empty installation directory, an
+existing container, occupied ports, or an existing reverse-proxy domain. Use
+the manual procedures below for migrations, existing instances, custom
+failover layouts, or more than one Guard instance on the same host.
+
 ## Prepare
 
 1. Choose a pinned GHCR release tag or digest and copy the matching environment

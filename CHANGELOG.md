@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.0 - 2026-09-23
+
+- Added a guarded interactive Linux installer for fresh single-instance deployments with Docker and Compose detection, upstream/network selection, port checks, release resolution, digest pinning, and readiness verification.
+- Moved installer-created master keys and administrator passwords to root-managed bind-mounted secret files and kept both Guard listeners on host loopback.
+- Added optional verified installation of the restricted host updater and conflict-safe Caddy/Nginx configuration generation or application.
+- Added a non-interactive automation contract, installer syntax/contract tests, and public onboarding documentation.
+
 ## v0.7.2 - 2026-09-22
 
 - Replaced route-wide overview verification with a lightweight, cached session check so navigation no longer waits for dashboard aggregation.

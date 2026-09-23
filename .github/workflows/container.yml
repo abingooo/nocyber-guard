@@ -30,6 +30,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check interactive installer
+        shell: bash
+        run: |
+          bash -n install.sh .github/install-test.sh
+          shellcheck install.sh .github/install-test.sh
+          bash .github/install-test.sh
+
       - name: Check Go formatting
         shell: bash
         run: |
@@ -82,7 +89,7 @@ jobs:
       - name: Validate release metadata
         run: |
           jq -e '.schema_version == 1 and .product == "NoCyber Guard"' SOURCE_MANIFEST.json >/dev/null
-          jq -e '.schema_version == 1 and .product_version == "0.7.2"' compatibility.json >/dev/null
+          jq -e '.schema_version == 1 and .product_version == "0.8.0"' compatibility.json >/dev/null
 
   compose-e2e:
     name: Compose proxy E2E
