@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.8.2",
+  "product_version": "0.8.3",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -89,5 +89,11 @@
     "accepted_wrappers": ["single JSON markdown fence", "one JSON object surrounded by explanatory text", "OpenAI text content blocks"],
     "normalization": ["case-insensitive field names and verdict values", "numeric confidence strings", "ignored non-conflicting extra metadata"],
     "safety": "multiple verdict objects, duplicate canonical fields, missing required fields, invalid verdicts, and non-finite or out-of-range confidence values remain invalid"
+  },
+  "ai_reasoning_compatibility_v0_8_3": {
+    "fallback_order": ["json_schema", "json_object with thinking disabled", "plain json_object"],
+    "max_output_tokens": 4096,
+    "purpose": "prevent provider reasoning tokens from exhausting the response budget before the JSON verdict",
+    "failure_policy": "timeouts, incomplete output, and unsupported provider extensions remain fail-open"
   }
 }

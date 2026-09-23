@@ -86,9 +86,16 @@ func (reviewer *OpenAIReviewer) Review(ctx context.Context, input AIReviewReques
 		return AIVerdict{}, ErrAIUnavailable
 	}
 	started := time.Now()
-	result, status, err := reviewer.reviewWithFormat(ctx, input, "json_schema")
-	if err != nil && (status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity) {
-		result, _, err = reviewer.reviewWithFormat(ctx, input, "json_object")
+	result, status, err := reviewer.reviewWithFormat(ctx, input, "json_schema", false)
+	if err != nil && responseFormatFallbackStatus(status) {
+		// DeepSeek and some compatible gateways support JSON object mode but not
+		// JSON Schema. Disable provider-side thinking on this fallback so a small
+		// structured verdict is not displaced by reasoning tokens. A final retry
+		// without the extension preserves compatibility with strict OpenAI clones.
+		result, status, err = reviewer.reviewWithFormat(ctx, input, "json_object", true)
+		if err != nil && responseFormatFallbackStatus(status) {
+			result, _, err = reviewer.reviewWithFormat(ctx, input, "json_object", false)
+		}
 	}
 	if err != nil {
 		return AIVerdict{}, err
@@ -98,7 +105,7 @@ func (reviewer *OpenAIReviewer) Review(ctx context.Context, input AIReviewReques
 	return result, nil
 }
 
-func (reviewer *OpenAIReviewer) reviewWithFormat(ctx context.Context, input AIReviewRequest, responseMode string) (AIVerdict, int, error) {
+func (reviewer *OpenAIReviewer) reviewWithFormat(ctx context.Context, input AIReviewRequest, responseMode string, disableThinking bool) (AIVerdict, int, error) {
 	userPayload, err := json.Marshal(struct {
 		Field       string `json:"field"`
 		Content     string `json:"content"`
@@ -119,7 +126,10 @@ func (reviewer *OpenAIReviewer) reviewWithFormat(ctx context.Context, input AIRe
 			{"role": "user", "content": string(userPayload)},
 		},
 		"temperature": 0,
-		"max_tokens":  300,
+		"max_tokens":  4096,
+	}
+	if disableThinking {
+		requestBody["thinking"] = map[string]string{"type": "disabled"}
 	}
 	if responseMode == "json_schema" {
 		requestBody["response_format"] = map[string]any{
@@ -180,6 +190,10 @@ func (reviewer *OpenAIReviewer) reviewWithFormat(ctx context.Context, input AIRe
 		return AIVerdict{}, response.StatusCode, err
 	}
 	return result, response.StatusCode, nil
+}
+
+func responseFormatFallbackStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity
 }
 
 func chatCompletionsURL(raw string) (string, error) {

@@ -89,7 +89,7 @@ jobs:
       - name: Validate release metadata
         run: |
           jq -e '.schema_version == 1 and .product == "NoCyber Guard"' SOURCE_MANIFEST.json >/dev/null
-          jq -e '.schema_version == 1 and .product_version == "0.8.2"' compatibility.json >/dev/null
+          jq -e '.schema_version == 1 and .product_version == "0.8.3"' compatibility.json >/dev/null
 
   compose-e2e:
     name: Compose proxy E2E

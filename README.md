@@ -20,6 +20,10 @@ text content blocks, case-only field/value differences, numeric confidence
 strings, and non-conflicting extra metadata. Multiple verdict objects,
 duplicate canonical fields, missing required fields, invalid results, and
 non-finite or out-of-range confidence values remain `ai_invalid` and fail open.
+When a provider supports JSON Object but not JSON Schema, Guard asks it to
+disable reasoning and reserves up to 4,096 output tokens for the verdict. If
+the provider rejects that optional control, Guard retries with a standards-only
+JSON Object request so strict OpenAI-compatible gateways remain supported.
 
 ## Key traceability and rule plaintext
 

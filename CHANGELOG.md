@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.3 - 2026-09-23
+
+- Disabled provider-side thinking on the JSON-object fallback so reasoning tokens cannot consume the verdict output budget.
+- Increased the reviewer output budget from 300 to 4,096 tokens for compatible gateways that cannot disable thinking.
+- Added a third standards-only JSON-object fallback when a strict OpenAI-compatible provider rejects the optional thinking control.
+- Reproduced the original `ai_invalid` against the configured DeepSeek node and verified that the corrected request returns a complete four-field verdict.
+
 ## v0.8.2 - 2026-09-23
 
 - Added a compatibility parser for common OpenAI-compatible reviewer deviations while preserving the exact four-field JSON parser as the preferred path.

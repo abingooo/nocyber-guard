@@ -72,6 +72,13 @@ func TestOpenAIReviewerFallsBackToJSONObject(t *testing.T) {
 		if format["type"] != "json_object" {
 			t.Errorf("second mode = %#v", format)
 		}
+		thinking, ok := body["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "disabled" {
+			t.Errorf("thinking = %#v, want disabled", body["thinking"])
+		}
+		if body["max_tokens"] != float64(4096) {
+			t.Errorf("max_tokens = %#v", body["max_tokens"])
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"result\":\"pass\",\"confidence\":1,\"reason\":\"ok\",\"category\":\"benign\"}"}}]}`))
 	}))
 	defer server.Close()
@@ -81,6 +88,52 @@ func TestOpenAIReviewerFallsBackToJSONObject(t *testing.T) {
 	}
 	result, err := reviewer.Review(context.Background(), AIReviewRequest{Field: "input1", Content: "hello"})
 	if err != nil || result.Result != VerdictPass || calls.Load() != 2 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, calls.Load())
+	}
+}
+
+func TestOpenAIReviewerFallsBackWhenThinkingExtensionIsRejected(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		call := calls.Add(1)
+		format := body["response_format"].(map[string]any)
+		switch call {
+		case 1:
+			if format["type"] != "json_schema" {
+				t.Errorf("first mode = %#v", format)
+			}
+			http.Error(w, "unsupported response format", http.StatusBadRequest)
+		case 2:
+			if format["type"] != "json_object" || body["thinking"] == nil {
+				t.Errorf("second request = %#v", body)
+			}
+			http.Error(w, "unknown field thinking", http.StatusBadRequest)
+		case 3:
+			if format["type"] != "json_object" {
+				t.Errorf("third mode = %#v", format)
+			}
+			if _, exists := body["thinking"]; exists {
+				t.Errorf("third request still contains thinking: %#v", body["thinking"])
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"result\":\"pass\",\"confidence\":1,\"reason\":\"ok\",\"category\":\"benign\"}"}}]}`))
+		default:
+			t.Errorf("unexpected call %d", call)
+			http.Error(w, "unexpected call", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	reviewer, err := NewOpenAIReviewer(OpenAIReviewerConfig{BaseURL: server.URL, APIKey: "token", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewer.Review(context.Background(), AIReviewRequest{Field: "input1", Content: "hello"})
+	if err != nil || result.Result != VerdictPass || calls.Load() != 3 {
 		t.Fatalf("result=%#v err=%v calls=%d", result, err, calls.Load())
 	}
 }
