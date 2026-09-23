@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.8.4 - 2026-09-23
+
+- Recalibrated the reviewer prompt so coherent first-party system, developer, agent, memory, tool-use, permission, workflow, and safety policies are treated as legitimate templates rather than prompt injection by default.
+- Required ambiguous classifications to return `uncertain` and reserved confidence at or above `0.95` for explicit, unambiguous evidence.
+- Persisted and exposed the complete synchronous AI reason and category for new audit events.
+- Linked event details to the latest asynchronous review job and displayed every node's result, confidence, category, complete reason, latency, and error.
+- Added authenticated no-store delivery and backend/frontend regression coverage for the complete review explanation chain.
+
 ## v0.8.3 - 2026-09-23
 
 - Disabled provider-side thinking on the JSON-object fallback so reasoning tokens cannot consume the verdict output budget.

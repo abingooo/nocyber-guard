@@ -312,8 +312,6 @@ func (s *Store) migrateEventContractV2(ctx context.Context, appliedAt string) er
 			WHEN decision='block' THEN 'block'
 			WHEN reason IN ('parse_bypass','empty_bypass','oversize_bypass','ai_uncertain','ai_low_confidence','ai_unavailable','ai_rate_limited','ai_timeout','ai_invalid','ai_bulkhead_fail_open','storage_fail_open','body_read_fail_open','unsupported_content_encoding_fail_open','content_decode_fail_open') THEN 'fail_open'
 			ELSE 'allow' END,
-		ai_reason='',
-		ai_category='',
 		audit_latency_ms=latency_ms,
 		ai_latency_ms=CASE WHEN ai_latency_ms < 0 THEN 0 ELSE ai_latency_ms END,
 		upstream_accessed=CASE WHEN decision='block' THEN 0 ELSE 1 END`); err != nil {
@@ -876,16 +874,18 @@ func (s *Store) insertEvent(ctx context.Context, tx *sql.Tx, e audit.Event) (int
 		// outcome means the request is handed to the upstream exactly once.
 		e.UpstreamAccessed = true
 	}
-	aiResult, aiConf := "", 0.0
+	aiResult, aiConf, aiReason, aiCategory := "", 0.0, "", ""
 	if e.AIVerdict != nil {
 		aiResult = string(e.AIVerdict.Result)
 		aiConf = e.AIVerdict.Confidence
+		aiReason = safeReviewerReason(e.AIVerdict.Reason)
+		aiCategory = safeEventText(e.AIVerdict.Category, 120)
 	}
 	upstreamAccessed := 0
 	if e.UpstreamAccessed {
 		upstreamAccessed = 1
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO audit_events(request_id,method,path,protocol,model,user_agent,profile_key,api_key_fingerprint,api_key_hint,decision,action,outcome,reason,field_name,sha256,prompt_bytes,prompt_runes,ai_sampled,ai_result,ai_confidence,ai_reason,ai_category,latency_ms,audit_latency_ms,ai_latency_ms,upstream_accessed,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.RequestID, e.Method, e.Path, e.Protocol, e.Model, e.UserAgent, e.ProfileKey, e.APIKeyFingerprint, e.APIKeyHint, e.Decision, string(e.Action), string(e.Outcome), string(e.Reason), e.Field, e.SHA256, e.PromptBytes, e.PromptRunes, e.AISampled, aiResult, aiConf, "", "", e.AuditLatency.Milliseconds(), e.AuditLatency.Milliseconds(), e.AILatency.Milliseconds(), upstreamAccessed, e.CreatedAt.Format(time.RFC3339Nano))
+	res, err := tx.ExecContext(ctx, `INSERT INTO audit_events(request_id,method,path,protocol,model,user_agent,profile_key,api_key_fingerprint,api_key_hint,decision,action,outcome,reason,field_name,sha256,prompt_bytes,prompt_runes,ai_sampled,ai_result,ai_confidence,ai_reason,ai_category,latency_ms,audit_latency_ms,ai_latency_ms,upstream_accessed,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.RequestID, e.Method, e.Path, e.Protocol, e.Model, e.UserAgent, e.ProfileKey, e.APIKeyFingerprint, e.APIKeyHint, e.Decision, string(e.Action), string(e.Outcome), string(e.Reason), e.Field, e.SHA256, e.PromptBytes, e.PromptRunes, e.AISampled, aiResult, aiConf, aiReason, aiCategory, e.AuditLatency.Milliseconds(), e.AuditLatency.Milliseconds(), e.AILatency.Milliseconds(), upstreamAccessed, e.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -899,6 +899,19 @@ func safeEventText(value string, maxBytes int) string {
 	}
 	for _, r := range value {
 		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return value
+}
+
+func safeReviewerReason(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 1000 || !utf8.ValidString(value) {
+		return ""
+	}
+	for _, r := range value {
+		if (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || r == 0x7f {
 			return ""
 		}
 	}
@@ -945,28 +958,32 @@ func boundedEvidence(v string, limit int) (string, bool) {
 }
 
 type Event struct {
-	ID                int64   `json:"id"`
-	RequestID         string  `json:"request_id"`
-	CreatedAt         string  `json:"created_at"`
-	Path              string  `json:"path"`
-	Decision          string  `json:"decision"`
-	Action            string  `json:"action"`
-	Outcome           string  `json:"outcome"`
-	Reason            string  `json:"reason"`
-	FieldName         string  `json:"field_name"`
-	ClientProfile     string  `json:"client_profile"`
-	UserAgent         string  `json:"user_agent"`
-	Model             string  `json:"model"`
-	APIKeyFingerprint string  `json:"api_key_fingerprint"`
-	APIKeyHint        string  `json:"api_key_hint"`
-	PromptSHA256      string  `json:"prompt_sha256"`
-	AIResult          string  `json:"ai_result"`
-	AIConfidence      float64 `json:"ai_confidence"`
-	LatencyMS         int64   `json:"latency_ms"`
-	AuditLatencyMS    int64   `json:"audit_latency_ms"`
-	AILatencyMS       int64   `json:"ai_latency_ms"`
-	UpstreamAccessed  bool    `json:"upstream_accessed"`
-	EvidenceAvailable bool    `json:"evidence_available"`
+	ID                int64        `json:"id"`
+	RequestID         string       `json:"request_id"`
+	CreatedAt         string       `json:"created_at"`
+	Path              string       `json:"path"`
+	Decision          string       `json:"decision"`
+	Action            string       `json:"action"`
+	Outcome           string       `json:"outcome"`
+	Reason            string       `json:"reason"`
+	FieldName         string       `json:"field_name"`
+	ClientProfile     string       `json:"client_profile"`
+	UserAgent         string       `json:"user_agent"`
+	Model             string       `json:"model"`
+	APIKeyFingerprint string       `json:"api_key_fingerprint"`
+	APIKeyHint        string       `json:"api_key_hint"`
+	PromptSHA256      string       `json:"prompt_sha256"`
+	AIResult          string       `json:"ai_result"`
+	AIConfidence      float64      `json:"ai_confidence"`
+	AIReason          string       `json:"ai_reason"`
+	AICategory        string       `json:"ai_category"`
+	LatencyMS         int64        `json:"latency_ms"`
+	AuditLatencyMS    int64        `json:"audit_latency_ms"`
+	AILatencyMS       int64        `json:"ai_latency_ms"`
+	UpstreamAccessed  bool         `json:"upstream_accessed"`
+	EvidenceAvailable bool         `json:"evidence_available"`
+	ReviewJob         *ReviewJob   `json:"review_job,omitempty"`
+	AsyncVotes        []ReviewVote `json:"async_votes,omitempty"`
 }
 
 // EventFilter contains optional filters for the administrative event list.
@@ -989,7 +1006,7 @@ func (s *Store) ListRecentEvents(ctx context.Context, limit int) ([]Event, error
 	if limit < 1 || limit > 100 {
 		limit = 8
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events ORDER BY id DESC LIMIT ?", time.Now().UTC().Format(time.RFC3339Nano), limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,ai_reason,ai_category,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events ORDER BY id DESC LIMIT ?", time.Now().UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -997,7 +1014,7 @@ func (s *Store) ListRecentEvents(ctx context.Context, limit int) ([]Event, error
 	out := make([]Event, 0, limit)
 	for rows.Next() {
 		var event Event
-		if err = rows.Scan(&event.ID, &event.RequestID, &event.CreatedAt, &event.Path, &event.Decision, &event.Action, &event.Outcome, &event.Reason, &event.FieldName, &event.ClientProfile, &event.UserAgent, &event.Model, &event.APIKeyFingerprint, &event.APIKeyHint, &event.PromptSHA256, &event.AIResult, &event.AIConfidence, &event.AuditLatencyMS, &event.AILatencyMS, &event.UpstreamAccessed, &event.EvidenceAvailable); err != nil {
+		if err = rows.Scan(&event.ID, &event.RequestID, &event.CreatedAt, &event.Path, &event.Decision, &event.Action, &event.Outcome, &event.Reason, &event.FieldName, &event.ClientProfile, &event.UserAgent, &event.Model, &event.APIKeyFingerprint, &event.APIKeyHint, &event.PromptSHA256, &event.AIResult, &event.AIConfidence, &event.AIReason, &event.AICategory, &event.AuditLatencyMS, &event.AILatencyMS, &event.UpstreamAccessed, &event.EvidenceAvailable); err != nil {
 			return nil, err
 		}
 		event.LatencyMS = event.AuditLatencyMS
@@ -1044,7 +1061,7 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 	queryArgs := []any{time.Now().UTC().Format(time.RFC3339Nano)}
 	queryArgs = append(queryArgs, args...)
 	queryArgs = append(queryArgs, size, (page-1)*size)
-	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE "+where+" ORDER BY id DESC LIMIT ? OFFSET ?", queryArgs...)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,ai_reason,ai_category,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE "+where+" ORDER BY id DESC LIMIT ? OFFSET ?", queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1052,7 +1069,7 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 	out := []Event{}
 	for rows.Next() {
 		var e Event
-		if err = rows.Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable); err != nil {
+		if err = rows.Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AIReason, &e.AICategory, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable); err != nil {
 			return nil, 0, err
 		}
 		e.LatencyMS = e.AuditLatencyMS
@@ -1062,9 +1079,20 @@ func (s *Store) ListEventsFiltered(ctx context.Context, page, size int, filter E
 }
 func (s *Store) GetEvent(ctx context.Context, id int64) (Event, error) {
 	var e Event
-	err := s.db.QueryRowContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id).Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable)
+	err := s.db.QueryRowContext(ctx, "SELECT id,request_id,created_at,path,decision,action,outcome,reason,field_name,profile_key,user_agent,model,api_key_fingerprint,api_key_hint,sha256,ai_result,ai_confidence,ai_reason,ai_category,audit_latency_ms,ai_latency_ms,upstream_accessed,EXISTS(SELECT 1 FROM blocked_evidence b WHERE b.event_id=audit_events.id AND b.expires_at>?) FROM audit_events WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id).Scan(&e.ID, &e.RequestID, &e.CreatedAt, &e.Path, &e.Decision, &e.Action, &e.Outcome, &e.Reason, &e.FieldName, &e.ClientProfile, &e.UserAgent, &e.Model, &e.APIKeyFingerprint, &e.APIKeyHint, &e.PromptSHA256, &e.AIResult, &e.AIConfidence, &e.AIReason, &e.AICategory, &e.AuditLatencyMS, &e.AILatencyMS, &e.UpstreamAccessed, &e.EvidenceAvailable)
 	e.LatencyMS = e.AuditLatencyMS
-	return e, err
+	if err != nil || e.PromptSHA256 == "" {
+		return e, err
+	}
+	job, votes, reviewErr := s.latestReviewForSHA(ctx, e.PromptSHA256)
+	if reviewErr != nil && !errors.Is(reviewErr, sql.ErrNoRows) {
+		return Event{}, reviewErr
+	}
+	if reviewErr == nil {
+		e.ReviewJob = &job
+		e.AsyncVotes = votes
+	}
+	return e, nil
 }
 
 type Evidence struct {
@@ -1624,6 +1652,27 @@ func (s *Store) ListReviewVotes(ctx context.Context, jobID int64) ([]ReviewVote,
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) latestReviewForSHA(ctx context.Context, sha256Value string) (ReviewJob, []ReviewVote, error) {
+	var job ReviewJob
+	var sampled int
+	err := s.db.QueryRowContext(ctx, `SELECT id,job_key,sha256,field_name,model,api_key_fingerprint,api_key_hint,sampled,status,promotion,attempts,next_attempt_at,last_error,created_at,completed_at
+		FROM review_jobs WHERE sha256=? ORDER BY id DESC LIMIT 1`, strings.ToLower(sha256Value)).Scan(
+		&job.ID, &job.JobKey, &job.SHA256, &job.FieldName, &job.Model,
+		&job.APIKeyFingerprint, &job.APIKeyHint, &sampled, &job.Status,
+		&job.Promotion, &job.Attempts, &job.NextAttemptAt, &job.LastError,
+		&job.CreatedAt, &job.CompletedAt,
+	)
+	if err != nil {
+		return ReviewJob{}, nil, err
+	}
+	job.Sampled = sampled != 0
+	votes, err := s.ListReviewVotes(ctx, job.ID)
+	if err != nil {
+		return ReviewJob{}, nil, err
+	}
+	return job, votes, nil
 }
 
 func ValidateAIEndpoint(e AIEndpoint) error {

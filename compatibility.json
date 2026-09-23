@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.8.3",
+  "product_version": "0.8.4",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -95,5 +95,12 @@
     "max_output_tokens": 4096,
     "purpose": "prevent provider reasoning tokens from exhausting the response budget before the JSON verdict",
     "failure_policy": "timeouts, incomplete output, and unsupported provider extensions remain fail-open"
+  },
+  "review_explainability_v0_8_4": {
+    "classification": "coherent first-party agent and system policies are legitimate templates; ambiguous cases return uncertain",
+    "confidence": "0.95 or higher is reserved for explicit and unambiguous evidence",
+    "synchronous": "new events retain the complete validated AI reason and category",
+    "asynchronous": "event detail includes the latest review job and every node result, confidence, category, reason, latency, and error",
+    "access": "review explanations are available only through authenticated administration APIs and use Cache-Control no-store"
   }
 }

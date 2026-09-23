@@ -11,6 +11,7 @@ const error = ref('')
 const selected = ref<AuditEvent | null>(null)
 const evidence = ref<EventEvidence | null>(null)
 const evidenceLoading = ref(false)
+const detailLoading = ref(false)
 const ruleContent = ref('')
 const addingRule = ref<'trusted' | 'risk' | null>(null)
 const ruleError = ref('')
@@ -93,6 +94,14 @@ async function openEvent(event: AuditEvent) {
   ruleContent.value = ''
   ruleError.value = ''
   ruleNotice.value = ''
+  detailLoading.value = true
+  try {
+    selected.value = await api.getEvent(event.id)
+  } catch (requestError) {
+    toast.show('读取事件详情失败', { detail: requestError instanceof ApiError ? requestError.message : '请稍后重试', tone: 'error' })
+  } finally {
+    detailLoading.value = false
+  }
   if (event.evidence_available) {
     evidenceLoading.value = true
     try {
@@ -295,8 +304,38 @@ onMounted(load)
           <div><dt>选中字段</dt><dd>{{ selected.field_name || '—' }}</dd></div>
           <div><dt>Prompt Hash</dt><dd class="breakable"><code>{{ selected.prompt_sha256 || '—' }}</code></dd></div>
           <div><dt>AI 结果</dt><dd>{{ selected.ai_result || '—' }}<span v-if="selected.ai_confidence != null">（置信度 {{ (selected.ai_confidence * 100).toFixed(0) }}%）</span></dd></div>
+          <div><dt>AI 分类</dt><dd class="breakable">{{ selected.ai_category || '—' }}</dd></div>
+          <div><dt>AI 判断理由</dt><dd class="reason-text">{{ selected.ai_reason || '—' }}</dd></div>
           <div><dt>审核 / AI 耗时</dt><dd>{{ selected.audit_latency_ms }} / {{ selected.ai_latency_ms }} ms</dd></div>
         </dl>
+        <div v-if="detailLoading" class="loading-state compact"><span class="loader" />读取完整判断记录…</div>
+        <div v-else-if="selected.review_job" class="review-section">
+          <div class="section-label">异步审核任务</div>
+          <dl class="detail-list review-job-summary">
+            <div><dt>任务状态</dt><dd>{{ selected.review_job.status }}</dd></div>
+            <div><dt>晋级结果</dt><dd>{{ selected.review_job.promotion || '未晋级' }}</dd></div>
+            <div><dt>执行次数</dt><dd>{{ selected.review_job.attempts }}</dd></div>
+            <div><dt>创建 / 完成</dt><dd>{{ formatTime(selected.review_job.created_at) }}<template v-if="selected.review_job.completed_at"> / {{ formatTime(selected.review_job.completed_at) }}</template></dd></div>
+            <div v-if="selected.review_job.last_error"><dt>任务错误</dt><dd class="reason-text">{{ selected.review_job.last_error }}</dd></div>
+          </dl>
+          <div class="section-label vote-heading">异步节点投票（{{ selected.async_votes?.length || 0 }}）</div>
+          <div v-if="selected.async_votes?.length" class="vote-list">
+            <article v-for="vote in selected.async_votes" :key="vote.id" class="vote-card">
+              <div class="vote-card-header">
+                <strong>{{ vote.node_slot }}</strong>
+                <span class="decision-badge" :class="vote.result === 'reject' ? 'decision-block' : vote.result === 'pass' ? 'decision-allow' : 'decision-bypass'">{{ vote.result || '无有效票' }}</span>
+              </div>
+              <dl class="vote-details">
+                <div><dt>置信度</dt><dd>{{ vote.confidence == null ? '—' : `${(vote.confidence * 100).toFixed(0)}%` }}</dd></div>
+                <div><dt>分类</dt><dd>{{ vote.category || '—' }}</dd></div>
+                <div><dt>耗时</dt><dd>{{ vote.latency_ms }} ms</dd></div>
+                <div><dt>判断理由</dt><dd class="reason-text">{{ vote.reason || '—' }}</dd></div>
+                <div v-if="vote.error"><dt>节点错误</dt><dd class="reason-text">{{ vote.error }}</dd></div>
+              </dl>
+            </article>
+          </div>
+          <p v-else class="muted">尚无异步节点投票。</p>
+        </div>
         <div class="evidence-section">
           <div class="section-label">审核证据</div>
           <div v-if="evidenceLoading" class="loading-state compact"><span class="loader" />读取证据…</div>

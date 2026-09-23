@@ -293,8 +293,8 @@ func TestEventContractMigrationBackfillsLegacyDatabase(t *testing.T) {
 		t.Fatalf("migrated event contract = %+v", event)
 	}
 	var aiReason, aiCategory string
-	if err := store.db.QueryRowContext(ctx, "SELECT ai_reason,ai_category FROM audit_events WHERE id=1").Scan(&aiReason, &aiCategory); err != nil || aiReason != "" || aiCategory != "" {
-		t.Fatalf("legacy reviewer free text was not cleared: reason=%q category=%q err=%v", aiReason, aiCategory, err)
+	if err := store.db.QueryRowContext(ctx, "SELECT ai_reason,ai_category FROM audit_events WHERE id=1").Scan(&aiReason, &aiCategory); err != nil || aiReason != "legacy-free-text" || aiCategory != "legacy-category" {
+		t.Fatalf("legacy reviewer explanation was not preserved: reason=%q category=%q err=%v", aiReason, aiCategory, err)
 	}
 	var migrationCount int
 	if err := store.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version=2").Scan(&migrationCount); err != nil || migrationCount != 1 {
@@ -763,16 +763,17 @@ func TestSQLitePragmasApplyToEveryConnection(t *testing.T) {
 	}
 }
 
-func TestEventContractAndReviewerFreeTextIsNotPersisted(t *testing.T) {
+func TestEventContractPersistsReviewerExplanation(t *testing.T) {
 	ctx := context.Background()
-	store, dataDir, _ := openTestStore(t)
-	canary := "ordinary-event-must-not-contain-prompt-canary-83c1"
+	store, _, _ := openTestStore(t)
+	reason := "This is a coherent first-party agent policy.\nIt contains no malicious request."
+	category := "benign_agent_template"
 	event := testAuditEvent("event-contract", time.Now().UTC())
 	event.Reason = audit.ReasonAIUnavailable
 	event.AuditLatency = 41 * time.Millisecond
 	event.AILatency = 31 * time.Millisecond
 	event.Latency = 0
-	event.AIVerdict = &audit.AIVerdict{Result: audit.VerdictUncertain, Confidence: 0.42, Reason: canary, Category: canary}
+	event.AIVerdict = &audit.AIVerdict{Result: audit.VerdictUncertain, Confidence: 0.42, Reason: reason, Category: category}
 
 	if err := store.RecordAuditEvent(ctx, event); err != nil {
 		t.Fatalf("RecordAuditEvent: %v", err)
@@ -787,17 +788,52 @@ func TestEventContractAndReviewerFreeTextIsNotPersisted(t *testing.T) {
 		t.Fatalf("event contract = %+v", got)
 	}
 	detail, err := store.GetEvent(ctx, got.ID)
-	if err != nil || detail != got {
+	if err != nil || detail.ID != got.ID {
 		t.Fatalf("GetEvent = (%+v, %v), want %+v", detail, err, got)
 	}
-	var aiReason, aiCategory string
-	if err := store.db.QueryRowContext(ctx, "SELECT ai_reason,ai_category FROM audit_events WHERE id=?", got.ID).Scan(&aiReason, &aiCategory); err != nil {
-		t.Fatalf("read reviewer free text: %v", err)
+	if got.AIReason != reason || got.AICategory != category || detail.AIReason != reason || detail.AICategory != category {
+		t.Fatalf("reviewer explanation not preserved: list=%+v detail=%+v", got, detail)
 	}
-	if aiReason != "" || aiCategory != "" {
-		t.Fatalf("reviewer free text persisted: reason=%q category=%q", aiReason, aiCategory)
+}
+
+func TestEventDetailIncludesLatestAsyncVotes(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := openTestStore(t)
+	content := "stable system agent template"
+	hash := hashPlaintext(content)
+	event := testAuditEvent("event-with-votes", time.Now().UTC())
+	event.SHA256 = hash
+	if err := store.RecordAuditEvent(ctx, event); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
 	}
-	assertDatabaseArtifactsExclude(t, dataDir, canary)
+	job, created, err := store.CreateReviewJob(ctx, hash, hash, "instructions", "target-model", content, content, false, strings.Repeat("d", 64), "sk-…ABCD")
+	if err != nil || !created {
+		t.Fatalf("CreateReviewJob = (%+v, %v, %v)", job, created, err)
+	}
+	votes := []ReviewVote{
+		{JobID: job.ID, NodeSlot: "async_1", Result: "pass", Confidence: 0.98, Reason: "coherent policy", Category: "benign_agent_template", LatencyMS: 120},
+		{JobID: job.ID, NodeSlot: "async_2", Result: "pass", Confidence: 0.96, Reason: "no malicious objective", Category: "benign_agent_template", LatencyMS: 150},
+		{JobID: job.ID, NodeSlot: "async_3", Error: "ai_timeout", LatencyMS: 15000},
+	}
+	for _, vote := range votes {
+		if err := store.RecordReviewVote(ctx, vote); err != nil {
+			t.Fatalf("RecordReviewVote(%s): %v", vote.NodeSlot, err)
+		}
+	}
+	items, _, err := store.ListEvents(ctx, 1, 20, "", "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("ListEvents = (%+v, %v)", items, err)
+	}
+	detail, err := store.GetEvent(ctx, items[0].ID)
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+	if detail.ReviewJob == nil || detail.ReviewJob.ID != job.ID || len(detail.AsyncVotes) != 3 {
+		t.Fatalf("review detail = %+v votes=%+v", detail.ReviewJob, detail.AsyncVotes)
+	}
+	if detail.AsyncVotes[0].Reason != "coherent policy" || detail.AsyncVotes[1].Category != "benign_agent_template" || detail.AsyncVotes[2].Error != "ai_timeout" {
+		t.Fatalf("async votes lost explanation fields: %+v", detail.AsyncVotes)
+	}
 }
 
 func TestEventPersistsMaskedAPIKeyTraceAndSupportsSearch(t *testing.T) {

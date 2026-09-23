@@ -53,6 +53,12 @@ func TestOpenAIReviewerContract(t *testing.T) {
 	if !strings.Contains(user, "untrusted text") || !strings.Contains(user, "gpt-target") {
 		t.Fatalf("user payload = %q", user)
 	}
+	system := messages[0].(map[string]any)["content"].(string)
+	if !strings.Contains(system, "Do not reject merely because") ||
+		!strings.Contains(system, "return uncertain rather than reject") ||
+		!strings.Contains(system, "explicit and unambiguous") {
+		t.Fatalf("reviewer prompt is missing false-positive safeguards: %q", system)
+	}
 }
 
 func TestOpenAIReviewerFallsBackToJSONObject(t *testing.T) {

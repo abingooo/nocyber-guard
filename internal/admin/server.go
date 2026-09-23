@@ -950,6 +950,7 @@ func (s *Server) eventItem(w http.ResponseWriter, r *http.Request, path string) 
 		writeError(w, 404, "event_not_found", "事件不存在")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, item)
 }
 

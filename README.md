@@ -24,6 +24,12 @@ When a provider supports JSON Object but not JSON Schema, Guard asks it to
 disable reasoning and reserves up to 4,096 output tokens for the verdict. If
 the provider rejects that optional control, Guard retries with a standards-only
 JSON Object request so strict OpenAI-compatible gateways remain supported.
+The reviewer explicitly distinguishes coherent first-party agent and system
+policies from embedded prompt injection: imperative language, tool permissions,
+instruction hierarchy, and safety boundaries are not rejection signals by
+themselves. Ambiguous cases return `uncertain` and fail open. The event detail
+view records and displays the complete synchronous reason/category plus every
+asynchronous node's vote, confidence, category, reason, latency, and error.
 
 ## Key traceability and rule plaintext
 
@@ -48,8 +54,10 @@ because a SHA-256 digest cannot be reversed. Those rows are visibly marked in
 the library and accept a one-time plaintext backfill. Guard also fills the row
 automatically when the exact instruction is encountered again and its digest
 matches. Request traffic never overwrites plaintext that is already present.
-Plaintext is intentionally excluded from ordinary event rows and application
-logs.
+The selected instruction plaintext is intentionally excluded from ordinary
+event rows and application logs. AI explanations are retained in event and
+vote records for authenticated administrative review; they are never written
+to application logs.
 
 ## Interactive installer
 

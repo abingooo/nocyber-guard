@@ -43,11 +43,46 @@ export interface AuditEvent {
   prompt_sha256?: string
   ai_result?: string
   ai_confidence?: number
+  ai_reason?: string
+  ai_category?: string
   latency_ms?: number
   audit_latency_ms: number
   ai_latency_ms: number
   upstream_accessed: boolean
   evidence_available?: boolean
+  review_job?: ReviewJob
+  async_votes?: ReviewVote[]
+}
+
+export interface ReviewJob {
+  id: number | string
+  job_key: string
+  sha256: string
+  field_name?: string
+  model?: string
+  api_key_fingerprint?: string
+  api_key_hint?: string
+  sampled: boolean
+  status: string
+  promotion?: string
+  attempts: number
+  next_attempt_at?: string
+  last_error?: string
+  created_at: string
+  completed_at?: string
+}
+
+export interface ReviewVote {
+  id: number | string
+  job_id: number | string
+  node_slot: string
+  result?: string
+  confidence?: number
+  reason?: string
+  category?: string
+  latency_ms: number
+  error?: string
+  created_at: string
 }
 
 export interface EventEvidence {
