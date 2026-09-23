@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -174,7 +175,7 @@ func (reviewer *OpenAIReviewer) reviewWithFormat(ctx context.Context, input AIRe
 	if err != nil {
 		return AIVerdict{}, response.StatusCode, ErrAIInvalidResponse
 	}
-	result, err := parseStrictAIVerdict(content)
+	result, err := parseCompatibleAIVerdict(content)
 	if err != nil {
 		return AIVerdict{}, response.StatusCode, err
 	}
@@ -205,18 +206,53 @@ func extractOpenAIMessageContent(body []byte) (string, error) {
 	var response struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
-	if err := decoder.Decode(&response); err != nil || len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
+	if err := decoder.Decode(&response); err != nil || len(response.Choices) == 0 {
 		return "", ErrAIInvalidResponse
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
 		return "", ErrAIInvalidResponse
 	}
-	return response.Choices[0].Message.Content, nil
+	return decodeOpenAIMessageContent(response.Choices[0].Message.Content)
+}
+
+func decodeOpenAIMessageContent(raw json.RawMessage) (string, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return "", ErrAIInvalidResponse
+		}
+		return text, nil
+	}
+	var blocks []struct {
+		Type string          `json:"type"`
+		Text json.RawMessage `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil || len(blocks) == 0 {
+		return "", ErrAIInvalidResponse
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type != "text" && block.Type != "output_text" {
+			continue
+		}
+		var part string
+		if err := json.Unmarshal(block.Text, &part); err != nil {
+			return "", ErrAIInvalidResponse
+		}
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return "", ErrAIInvalidResponse
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 func parseStrictAIVerdict(content string) (AIVerdict, error) {
@@ -259,6 +295,154 @@ func parseStrictAIVerdict(content string) (AIVerdict, error) {
 		return AIVerdict{}, err
 	}
 	return result, nil
+}
+
+// parseCompatibleAIVerdict preserves the exact parser as the preferred path,
+// then accepts a narrow set of common provider formatting deviations. The
+// fallback still requires one unambiguous JSON object and the complete verdict
+// contract; it never invents a missing result, confidence, reason, or category.
+func parseCompatibleAIVerdict(content string) (AIVerdict, error) {
+	if result, err := parseStrictAIVerdict(content); err == nil {
+		return result, nil
+	}
+	candidate, ok := compatibleJSONObject(content)
+	if !ok {
+		return AIVerdict{}, ErrAIInvalidResponse
+	}
+	decoder := json.NewDecoder(strings.NewReader(candidate))
+	decoder.UseNumber()
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return AIVerdict{}, ErrAIInvalidResponse
+	}
+	fields := make(map[string]json.RawMessage, 4)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return AIVerdict{}, ErrAIInvalidResponse
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if _, duplicate := fields[key]; duplicate {
+			return AIVerdict{}, ErrAIInvalidResponse
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return AIVerdict{}, ErrAIInvalidResponse
+		}
+		fields[key] = value
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') || ensureJSONEOF(decoder) != nil {
+		return AIVerdict{}, ErrAIInvalidResponse
+	}
+	for _, key := range []string{"result", "confidence", "reason", "category"} {
+		if _, exists := fields[key]; !exists {
+			return AIVerdict{}, ErrAIInvalidResponse
+		}
+	}
+	var result AIVerdict
+	if decodeStrictString(fields["result"], (*string)(&result.Result)) != nil ||
+		decodeCompatibleNumber(fields["confidence"], &result.Confidence) != nil ||
+		decodeStrictString(fields["reason"], &result.Reason) != nil ||
+		decodeStrictString(fields["category"], &result.Category) != nil {
+		return AIVerdict{}, ErrAIInvalidResponse
+	}
+	result.Result = Verdict(strings.ToLower(strings.TrimSpace(string(result.Result))))
+	result.Reason = strings.TrimSpace(result.Reason)
+	result.Category = strings.TrimSpace(result.Category)
+	if err := ValidateAIVerdict(result); err != nil {
+		return AIVerdict{}, err
+	}
+	return result, nil
+}
+
+func compatibleJSONObject(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "\ufeff"))
+	if strings.HasPrefix(trimmed, "```") && strings.HasSuffix(trimmed, "```") {
+		lineEnd := strings.IndexByte(trimmed, '\n')
+		if lineEnd < 0 {
+			return "", false
+		}
+		language := strings.ToLower(strings.TrimSpace(trimmed[3:lineEnd]))
+		if language != "" && language != "json" {
+			return "", false
+		}
+		trimmed = strings.TrimSpace(trimmed[lineEnd+1 : len(trimmed)-3])
+	}
+	objects := topLevelJSONObjects(trimmed)
+	if len(objects) != 1 {
+		return "", false
+	}
+	return objects[0], true
+}
+
+func topLevelJSONObjects(content string) []string {
+	objects := make([]string, 0, 1)
+	start, depth := -1, 0
+	inString, escaped := false, false
+	for i := 0; i < len(content); i++ {
+		char := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if char == '\\' {
+				escaped = true
+				continue
+			}
+			if char == '"' {
+				inString = false
+			}
+			continue
+		}
+		if char == '"' && depth > 0 {
+			inString = true
+			continue
+		}
+		switch char {
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth == 0 {
+				return nil
+			}
+			depth--
+			if depth == 0 && start >= 0 {
+				objects = append(objects, content[start:i+1])
+				start = -1
+			}
+		}
+	}
+	if depth != 0 || inString {
+		return nil
+	}
+	return objects
+}
+
+func decodeCompatibleNumber(raw json.RawMessage, target *float64) error {
+	if err := decodeStrictNumber(raw, target); err == nil {
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ErrAIInvalidResponse
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, "%") {
+		return ErrAIInvalidResponse
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return ErrAIInvalidResponse
+	}
+	*target = parsed
+	return nil
 }
 
 func decodeStrictString(raw json.RawMessage, target *string) error {

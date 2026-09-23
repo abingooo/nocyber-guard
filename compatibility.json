@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.8.1",
+  "product_version": "0.8.2",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -83,5 +83,11 @@
     "default": "frame-ancestors 'none' with X-Frame-Options DENY",
     "configuration": "authenticated system settings accept up to 16 exact HTTPS origins and apply without restart",
     "configured_headers": "Content-Security-Policy lists only configured origins and legacy X-Frame-Options is omitted"
+  },
+  "ai_response_compatibility_v0_8_2": {
+    "preferred_parser": "exact four-field JSON verdict",
+    "accepted_wrappers": ["single JSON markdown fence", "one JSON object surrounded by explanatory text", "OpenAI text content blocks"],
+    "normalization": ["case-insensitive field names and verdict values", "numeric confidence strings", "ignored non-conflicting extra metadata"],
+    "safety": "multiple verdict objects, duplicate canonical fields, missing required fields, invalid verdicts, and non-finite or out-of-range confidence values remain invalid"
   }
 }

@@ -103,6 +103,80 @@ func TestOpenAIReviewerRejectsLooseOrInvalidContract(t *testing.T) {
 	}
 }
 
+func TestOpenAIReviewerAcceptsCompatibleVerdictFormatting(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		result     Verdict
+		confidence float64
+	}{
+		{
+			name:       "markdown fence",
+			content:    "```json\n{\"result\":\"pass\",\"confidence\":0.98,\"reason\":\"ok\",\"category\":\"benign\"}\n```",
+			result:     VerdictPass,
+			confidence: 0.98,
+		},
+		{
+			name:       "surrounding explanation",
+			content:    "Here is the verdict:\n{\"result\":\"reject\",\"confidence\":0.97,\"reason\":\"unsafe\",\"category\":\"injection\"}\nDone.",
+			result:     VerdictReject,
+			confidence: 0.97,
+		},
+		{
+			name:       "case string confidence and extra metadata",
+			content:    `{ "Result": " PASS ", "Confidence": "0.96", "Reason": " valid ", "Category": " benign_template ", "provider_note": "ok" }`,
+			result:     VerdictPass,
+			confidence: 0.96,
+		},
+		{
+			name:       "byte order mark",
+			content:    "\ufeff{\"result\":\"uncertain\",\"confidence\":0.5,\"reason\":\"unclear\",\"category\":\"unknown\"}",
+			result:     VerdictUncertain,
+			confidence: 0.5,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseCompatibleAIVerdict(test.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Result != test.result || got.Confidence != test.confidence {
+				t.Fatalf("verdict=%+v", got)
+			}
+		})
+	}
+}
+
+func TestOpenAIReviewerCompatibleParserRejectsAmbiguousOrIncompleteVerdicts(t *testing.T) {
+	contents := []string{
+		`{"result":"pass","confidence":1,"reason":"ok","category":"x"} {"result":"reject","confidence":1,"reason":"no","category":"x"}`,
+		`{"result":"allow","confidence":1,"reason":"ok","category":"x"}`,
+		`{"result":"pass","confidence":"95%","reason":"ok","category":"x"}`,
+		`{"result":"pass","confidence":"NaN","reason":"ok","category":"x"}`,
+		`{"result":"pass","confidence":1,"reason":"ok"}`,
+		`{"result":"pass","Result":"reject","confidence":1,"reason":"ok","category":"x"}`,
+		"```yaml\n{\"result\":\"pass\",\"confidence\":1,\"reason\":\"ok\",\"category\":\"x\"}\n```",
+	}
+	for _, content := range contents {
+		if _, err := parseCompatibleAIVerdict(content); !errors.Is(err, ErrAIInvalidResponse) {
+			t.Errorf("parseCompatibleAIVerdict(%q) error=%v", content, err)
+		}
+	}
+}
+
+func TestOpenAIReviewerAcceptsTextContentBlocks(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"content":[{"type":"reasoning","text":"ignored"},{"type":"text","text":"{\"result\":\"pass\",\"confidence\":1,\"reason\":\"ok\",\"category\":\"benign\"}"}]}}]}`)
+	content, err := extractOpenAIMessageContent(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict, err := parseCompatibleAIVerdict(content)
+	if err != nil || verdict.Result != VerdictPass {
+		t.Fatalf("verdict=%+v err=%v", verdict, err)
+	}
+}
+
 func TestOpenAIReviewerDoesNotFollowRedirect(t *testing.T) {
 	var destinationCalls atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

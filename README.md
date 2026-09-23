@@ -13,6 +13,14 @@ job and cancels outstanding calls. Timeout, error, uncertain, low-confidence,
 or conflicting votes are non-votes and never promote a rule. Promotions affect
 subsequent requests and do not require manual approval.
 
+AI reviewers are still asked for an exact four-field JSON verdict. For
+OpenAI-compatible providers that wrap otherwise valid JSON, Guard also accepts
+one unambiguous verdict inside a Markdown JSON fence or short explanatory text,
+text content blocks, case-only field/value differences, numeric confidence
+strings, and non-conflicting extra metadata. Multiple verdict objects,
+duplicate canonical fields, missing required fields, invalid results, and
+non-finite or out-of-range confidence values remain `ai_invalid` and fail open.
+
 ## Key traceability and rule plaintext
 
 Every observed request records an instance-local HMAC-SHA-256 fingerprint of

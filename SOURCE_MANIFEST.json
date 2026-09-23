@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "NoCyber Guard",
-  "product_version": "0.8.1",
+  "product_version": "0.8.2",
   "sources": [
     {
       "name": "ModelPort instruction audit V2",

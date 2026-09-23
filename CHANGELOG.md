@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.2 - 2026-09-23
+
+- Added a compatibility parser for common OpenAI-compatible reviewer deviations while preserving the exact four-field JSON parser as the preferred path.
+- Accepted a single JSON verdict inside Markdown fences or explanatory text, OpenAI text content blocks, case variations, numeric confidence strings, and non-conflicting extra metadata.
+- Kept ambiguous, incomplete, duplicate, invalid-result, non-finite, and out-of-range verdicts fail-open as `ai_invalid`.
+- Added regression coverage for both accepted provider formats and rejected ambiguous responses.
+
 ## v0.8.1 - 2026-09-23
 
 - Added a hot-reloadable system setting for exact HTTPS origins that may embed the administration console in an iframe.
