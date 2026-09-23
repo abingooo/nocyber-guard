@@ -384,6 +384,7 @@ func TestConfigVersionUpdateAndConflict(t *testing.T) {
 	updated := initial
 	updated.UpstreamURL = "http://upstream-v2.example"
 	updated.RequestTimeoutMS = 23000
+	updated.AdminFrameAncestors = []string{" https://ModelPort.Link/ "}
 	if err := store.PutConfig(ctx, updated, initial.Version); err != nil {
 		t.Fatalf("PutConfig update: %v", err)
 	}
@@ -395,7 +396,8 @@ func TestConfigVersionUpdateAndConflict(t *testing.T) {
 	if current.Version != initial.Version+1 {
 		t.Errorf("updated version = %d, want %d", current.Version, initial.Version+1)
 	}
-	if current.UpstreamURL != updated.UpstreamURL || current.RequestTimeoutMS != updated.RequestTimeoutMS {
+	if current.UpstreamURL != updated.UpstreamURL || current.RequestTimeoutMS != updated.RequestTimeoutMS ||
+		!reflect.DeepEqual(current.AdminFrameAncestors, []string{"https://modelport.link"}) {
 		t.Errorf("updated config = %+v, want persisted upstream and timeout %d", current, updated.RequestTimeoutMS)
 	}
 
@@ -430,6 +432,10 @@ func TestValidateConfigRejectsInvalidRuntimeValues(t *testing.T) {
 		{"short timeout", func(c *Config) { c.RequestTimeoutMS = 99 }},
 		{"large body", func(c *Config) { c.MaxBodyBytes = 65 << 20 }},
 		{"zero retention", func(c *Config) { c.EventRetentionDays = 0 }},
+		{"insecure frame ancestor", func(c *Config) { c.AdminFrameAncestors = []string{"http://modelport.link"} }},
+		{"frame ancestor path", func(c *Config) { c.AdminFrameAncestors = []string{"https://modelport.link/admin"} }},
+		{"frame ancestor wildcard", func(c *Config) { c.AdminFrameAncestors = []string{"https://*.modelport.link"} }},
+		{"duplicate frame ancestor", func(c *Config) { c.AdminFrameAncestors = []string{"https://modelport.link", "https://modelport.link/"} }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

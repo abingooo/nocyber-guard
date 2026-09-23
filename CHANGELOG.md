@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.1 - 2026-09-23
+
+- Added a hot-reloadable system setting for exact HTTPS origins that may embed the administration console in an iframe.
+- Kept clickjacking protection enabled by default; an empty allowlist continues to emit `frame-ancestors 'none'` and `X-Frame-Options: DENY`.
+- When origins are configured, the CSP lists only those origins and omits the incompatible legacy frame header so modern browsers can enforce the scoped policy.
+- Added validation against HTTP origins, wildcards, paths, duplicates, and header-control injection, plus backend and frontend regression coverage.
+
 ## v0.8.0 - 2026-09-23
 
 - Added a guarded interactive Linux installer for fresh single-instance deployments with Docker and Compose detection, upstream/network selection, port checks, release resolution, digest pinning, and readiness verification.

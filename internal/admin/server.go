@@ -35,6 +35,7 @@ type Server struct {
 	OnReload           func(context.Context) error
 	ValidateUpstream   func(*url.URL) error
 	ValidateAIEndpoint func(*url.URL) error
+	FrameAncestors     func() []string
 	TestAI             func(ctx *http.Request, endpoint storage.AIEndpoint) (time.Duration, error)
 	UpdaterSocket      string
 	limiter            *loginLimiter
@@ -64,7 +65,7 @@ func (s *Server) Handler() http.Handler {
 	dist, _ := fs.Sub(webassets.Dist, "dist")
 	files := http.FileServer(http.FS(dist))
 	mux.Handle("/", spaHandler(files, dist))
-	return securityHeaders(mux)
+	return s.securityHeaders(mux)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -1024,12 +1025,21 @@ func (l *loginLimiter) fail(ip string, now time.Time) {
 	l.attempts[ip] = append(l.attempts[ip], now)
 }
 func (l *loginLimiter) success(ip string) { l.mu.Lock(); defer l.mu.Unlock(); delete(l.attempts, ip) }
-func securityHeaders(next http.Handler) http.Handler {
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		ancestors := []string(nil)
+		if s.FrameAncestors != nil {
+			ancestors = s.FrameAncestors()
+		}
+		framePolicy := "'none'"
+		if len(ancestors) > 0 {
+			framePolicy = strings.Join(ancestors, " ")
+		} else {
+			w.Header().Set("X-Frame-Options", "DENY")
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors "+framePolicy)
 		next.ServeHTTP(w, r)
 	})
 }

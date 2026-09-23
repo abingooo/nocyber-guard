@@ -45,11 +45,12 @@ type runtime struct {
 }
 
 type runtimeState struct {
-	engine         *audit.Engine
-	paths          map[string]struct{}
-	rules          ruleSnapshot
-	auditBodyLimit int64
-	enabled        bool
+	engine              *audit.Engine
+	paths               map[string]struct{}
+	rules               ruleSnapshot
+	adminFrameAncestors []string
+	auditBodyLimit      int64
+	enabled             bool
 }
 
 type ruleSnapshot map[string]audit.HashMatch
@@ -314,6 +315,7 @@ func main() {
 	adminServer.ValidateUpstream = func(endpoint *url.URL) error {
 		return config.ValidateEndpointAgainstListeners(endpoint, cfg.ListenAddr, cfg.AdminListenAddr)
 	}
+	adminServer.FrameAncestors = rt.adminFrameAncestors
 	adminServer.OnReload = func(reloadCtx context.Context) error {
 		if err := rt.reload(reloadCtx, logger); err != nil {
 			return err
@@ -458,9 +460,18 @@ func (rt *runtime) reload(ctx context.Context, logger *slog.Logger) error {
 		paths[p] = struct{}{}
 	}
 	rt.bulkhead.SetLimit(engineCfg.AIConcurrency)
-	rt.state.Store(&runtimeState{engine: engine, paths: paths, rules: rules, auditBodyLimit: stored.MaxBodyBytes, enabled: stored.Enabled})
+	rt.state.Store(&runtimeState{engine: engine, paths: paths, rules: rules, adminFrameAncestors: append([]string(nil), stored.AdminFrameAncestors...), auditBodyLimit: stored.MaxBodyBytes, enabled: stored.Enabled})
 	rt.cfg.Store(cfg)
 	return nil
+}
+
+func (rt *runtime) adminFrameAncestors() []string {
+	value := rt.state.Load()
+	state, ok := value.(*runtimeState)
+	if !ok || state == nil {
+		return nil
+	}
+	return append([]string(nil), state.adminFrameAncestors...)
 }
 
 func (rt *runtime) ready(ctx context.Context) error {

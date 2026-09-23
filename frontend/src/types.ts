@@ -107,6 +107,7 @@ export interface GuardConfig {
   mode: 'permissive'
   upstream_url: string
   protected_paths: string[]
+  admin_frame_ancestors: string[]
   request_timeout_ms: number
   max_body_bytes: number
   event_retention_days: number

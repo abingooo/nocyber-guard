@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.8.0",
+  "product_version": "0.8.1",
   "proxy": {
     "transparent_default": true,
     "protected_requests": [
@@ -78,5 +78,10 @@
     "overview": "SQLite-backed twelve-hour traffic, latency, node configuration, promotions, and recent activity",
     "upstream": "persisted administrator-managed target applied atomically to new requests",
     "updates": "restricted host agent over a Unix socket; official repository digests only; automatic health-check rollback"
+  },
+  "admin_embedding_v0_8_1": {
+    "default": "frame-ancestors 'none' with X-Frame-Options DENY",
+    "configuration": "authenticated system settings accept up to 16 exact HTTPS origins and apply without restart",
+    "configured_headers": "Content-Security-Policy lists only configured origins and legacy X-Frame-Options is omitted"
   }
 }

@@ -355,18 +355,19 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, definition str
 }
 
 type Config struct {
-	Version            int64    `json:"version"`
-	Enabled            bool     `json:"enabled"`
-	Mode               string   `json:"mode"`
-	UpstreamURL        string   `json:"upstream_url"`
-	ProtectedPaths     []string `json:"protected_paths"`
-	RequestTimeoutMS   int64    `json:"request_timeout_ms"`
-	MaxBodyBytes       int64    `json:"max_body_bytes"`
-	EventRetentionDays int      `json:"event_retention_days"`
+	Version             int64    `json:"version"`
+	Enabled             bool     `json:"enabled"`
+	Mode                string   `json:"mode"`
+	UpstreamURL         string   `json:"upstream_url"`
+	ProtectedPaths      []string `json:"protected_paths"`
+	AdminFrameAncestors []string `json:"admin_frame_ancestors"`
+	RequestTimeoutMS    int64    `json:"request_timeout_ms"`
+	MaxBodyBytes        int64    `json:"max_body_bytes"`
+	EventRetentionDays  int      `json:"event_retention_days"`
 }
 
 func defaultConfig(upstream string) Config {
-	return Config{Version: 1, Enabled: true, Mode: "permissive", UpstreamURL: upstream, ProtectedPaths: []string{"/v1/responses", "/responses", "/backend-api/codex/responses"}, RequestTimeoutMS: 15000, MaxBodyBytes: 4 << 20, EventRetentionDays: 30}
+	return Config{Version: 1, Enabled: true, Mode: "permissive", UpstreamURL: upstream, ProtectedPaths: []string{"/v1/responses", "/responses", "/backend-api/codex/responses"}, AdminFrameAncestors: []string{}, RequestTimeoutMS: 15000, MaxBodyBytes: 4 << 20, EventRetentionDays: 30}
 }
 func (s *Store) GetConfig(ctx context.Context, bootstrapUpstream string) (Config, error) {
 	var raw string
@@ -387,9 +388,18 @@ func (s *Store) GetConfig(ctx context.Context, bootstrapUpstream string) (Config
 	if c.UpstreamURL == "" {
 		c.UpstreamURL = bootstrapUpstream
 	}
+	c.AdminFrameAncestors, err = NormalizeAdminFrameAncestors(c.AdminFrameAncestors)
+	if err != nil {
+		return Config{}, err
+	}
 	return c, nil
 }
 func (s *Store) PutConfig(ctx context.Context, c Config, expected int64) error {
+	var err error
+	c.AdminFrameAncestors, err = NormalizeAdminFrameAncestors(c.AdminFrameAncestors)
+	if err != nil {
+		return err
+	}
 	if err := ValidateConfig(c); err != nil {
 		return err
 	}
@@ -457,7 +467,45 @@ func ValidateConfig(c Config) error {
 	if c.EventRetentionDays < 1 || c.EventRetentionDays > 3650 {
 		return errors.New("event_retention_days must be between 1 and 3650")
 	}
+	if _, err := NormalizeAdminFrameAncestors(c.AdminFrameAncestors); err != nil {
+		return err
+	}
 	return nil
+}
+
+// NormalizeAdminFrameAncestors accepts exact HTTPS origins only. The empty
+// list intentionally means frame-ancestors 'none'. Wildcards, paths, embedded
+// credentials, and header control characters are rejected.
+func NormalizeAdminFrameAncestors(values []string) ([]string, error) {
+	if len(values) > 16 {
+		return nil, errors.New("admin_frame_ancestors must contain at most 16 origins")
+	}
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if len(value) > 2048 || strings.ContainsAny(value, "\r\n\t") {
+			return nil, fmt.Errorf("invalid admin frame ancestor %q", value)
+		}
+		u, err := url.Parse(value)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+			(u.Path != "" && u.Path != "/") || u.RawPath != "" || strings.Contains(u.Host, "*") {
+			return nil, fmt.Errorf("admin frame ancestor %q must be an exact HTTPS origin", value)
+		}
+		u.Scheme = "https"
+		u.Host = strings.ToLower(u.Host)
+		u.Path = ""
+		origin := u.String()
+		if _, duplicate := seen[origin]; duplicate {
+			return nil, fmt.Errorf("duplicate admin frame ancestor %q", origin)
+		}
+		seen[origin] = struct{}{}
+		normalized = append(normalized, origin)
+	}
+	return normalized, nil
 }
 
 type HashEntry struct {

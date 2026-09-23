@@ -364,6 +364,32 @@ func TestAdminAPIRequiresSessionAndCSRF(t *testing.T) {
 	assertErrorCode(t, rr, http.StatusForbidden, "csrf_failed")
 }
 
+func TestAdminFrameAncestorsAreHotReloadedIntoSecurityHeaders(t *testing.T) {
+	_, handler, _, _ := newAuthenticatedAdmin(t)
+	var ancestors []string
+	handler.server.FrameAncestors = func() []string { return append([]string(nil), ancestors...) }
+	h := handler.Handler()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := rr.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("default X-Frame-Options=%q, want DENY", got)
+	}
+	if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("default CSP=%q", got)
+	}
+
+	ancestors = []string{"https://modelport.link", "https://portal.example"}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := rr.Header().Get("X-Frame-Options"); got != "" {
+		t.Fatalf("configured X-Frame-Options=%q, want omitted", got)
+	}
+	if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors https://modelport.link https://portal.example") {
+		t.Fatalf("configured CSP=%q", got)
+	}
+}
+
 func TestEventsDateFiltersAreAppliedAndValidated(t *testing.T) {
 	store, handler, session, _ := newAuthenticatedAdmin(t)
 	ctx := context.Background()

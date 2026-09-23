@@ -99,6 +99,7 @@ function configUpdateBody(config: GuardConfig) {
     mode: config.mode,
     upstream_url: config.upstream_url,
     protected_paths: [...config.protected_paths],
+    admin_frame_ancestors: [...config.admin_frame_ancestors],
     request_timeout_ms: config.request_timeout_ms,
     max_body_bytes: config.max_body_bytes,
     event_retention_days: config.event_retention_days,

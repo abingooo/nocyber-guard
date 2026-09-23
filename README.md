@@ -102,6 +102,13 @@ system settings page. Guard validates the URL and atomically applies it to new
 requests without a container restart; the saved value remains authoritative
 after future restarts.
 
+The administration console blocks iframe embedding by default. An
+authenticated administrator can allow embedding from selected sites in
+**System settings → Allowed HTTPS embedding origins**. Enter one exact HTTPS
+origin per line, for example `https://modelport.link`. Changes apply without a
+restart. Wildcards, HTTP origins, credentials, paths, queries, and fragments
+are rejected; leaving the list empty restores the default clickjacking block.
+
 `NCG_MASTER_KEY` is used to encrypt local secrets. Generate it outside the
 shell history where possible, for example with `openssl rand -hex 32`, and do
 not commit the value. `NCG_MASTER_KEY_FILE` and

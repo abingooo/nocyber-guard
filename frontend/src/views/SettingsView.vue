@@ -27,6 +27,7 @@ const defaultConfig: GuardConfig = {
   mode: 'permissive',
   upstream_url: '',
   protected_paths: ['/v1/responses', '/responses', '/backend-api/codex/responses'],
+  admin_frame_ancestors: [],
   request_timeout_ms: 15000,
   max_body_bytes: 4 * 1024 * 1024,
   event_retention_days: 30,
@@ -90,6 +91,7 @@ function cloneConfig(value: GuardConfig): GuardConfig {
     mode: value.mode,
     upstream_url: value.upstream_url,
     protected_paths: [...value.protected_paths],
+    admin_frame_ancestors: [...(value.admin_frame_ancestors || [])],
     request_timeout_ms: value.request_timeout_ms,
     max_body_bytes: value.max_body_bytes,
     event_retention_days: value.event_retention_days,
@@ -201,10 +203,28 @@ async function saveConfig() {
     toast.show('请输入有效的 HTTP 或 HTTPS 上游服务地址', { tone: 'error' })
     return
   }
+  const frameAncestors: string[] = []
+  for (const raw of config.value.admin_frame_ancestors) {
+    const value = raw.trim()
+    if (!value) continue
+    try {
+      const parsed = new URL(value)
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.hostname.includes('*')) throw new Error('invalid origin')
+      frameAncestors.push(parsed.origin)
+    } catch {
+      toast.show('iframe 来源必须是完整的 HTTPS 来源', { detail: `无法识别：${value}`, tone: 'error' })
+      return
+    }
+  }
+  if (new Set(frameAncestors).size !== frameAncestors.length) {
+    toast.show('iframe 来源不能重复', { tone: 'error' })
+    return
+  }
   savingConfig.value = true
   try {
     const next = cloneConfig(config.value)
     next.upstream_url = next.upstream_url.trim().replace(/\/$/, '')
+    next.admin_frame_ancestors = frameAncestors
     const saved = await api.updateConfig(next)
     applyConfig(saved)
     toast.show('Guard 配置已保存')
@@ -264,6 +284,11 @@ async function testEndpoint() {
 
 function resetConfig() {
   config.value = cloneConfig(savedConfig.value)
+}
+
+function updateFrameAncestors(event: Event) {
+  const target = event.target as HTMLTextAreaElement
+  config.value.admin_frame_ancestors = target.value.split(/\r?\n/)
 }
 
 function resetEndpoint() {
@@ -406,6 +431,17 @@ onUnmounted(() => { if (updatePoll) window.clearTimeout(updatePoll) })
             </div>
             <span class="field-help">其他路径保持透明转发。</span>
           </div>
+          <label class="field-label span-2" for="admin-frame-ancestors">
+            允许嵌入后台的 HTTPS 来源
+            <textarea
+              id="admin-frame-ancestors"
+              :value="config.admin_frame_ancestors.join('\n')"
+              rows="3"
+              placeholder="https://modelport.link"
+              @input="updateFrameAncestors"
+            />
+            <span class="field-help">每行一个完整来源；留空时禁止 iframe。保存后立即生效，不支持通配符或带路径的地址。</span>
+          </label>
         </div>
       </section>
 
